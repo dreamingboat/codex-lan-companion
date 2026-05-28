@@ -9,7 +9,9 @@ const state = {
   account: null,
   accountExpanded: false,
   config: null,
-  authToken: ""
+  authToken: "",
+  threadStatus: null,
+  composerBusy: false
 };
 
 const els = {
@@ -69,6 +71,8 @@ const I18N = {
     roleTool: "工具",
     showUsage: "显示套餐用量",
     send: "发送",
+    stop: "停止",
+    stopCurrentTask: "停止当前任务",
     sendToCodex: "发送到当前 Codex 窗口",
     readonlyPlaceholder: "只读模式：启动时加 --write 才能发送",
     readonly: "只读模式",
@@ -103,6 +107,7 @@ const I18N = {
     minuteWindow: "{count} 分钟窗口",
     resetAt: "重置 {time}",
     sendFailed: "发送失败：{message}",
+    interruptFailed: "停止失败：{message}",
     untitled: "Untitled",
     separator: " · "
   },
@@ -130,6 +135,8 @@ const I18N = {
     roleTool: "Tool",
     showUsage: "Show plan usage",
     send: "Send",
+    stop: "Stop",
+    stopCurrentTask: "Stop current task",
     sendToCodex: "Send to current Codex window",
     readonlyPlaceholder: "Read-only: restart with --write to send",
     readonly: "Read-only",
@@ -164,6 +171,7 @@ const I18N = {
     minuteWindow: "{count} minute window",
     resetAt: "resets {time}",
     sendFailed: "Send failed: {message}",
+    interruptFailed: "Stop failed: {message}",
     untitled: "Untitled",
     separator: " · "
   }
@@ -585,8 +593,13 @@ async function postJson(url, body) {
 
 function renderComposerMode() {
   const allowWrite = Boolean(state.config?.allowWrite);
-  els.composerInput.disabled = !allowWrite;
-  els.sendButton.disabled = !allowWrite;
+  const thinking = Boolean(state.threadStatus?.thinking);
+  els.composerInput.disabled = !allowWrite || state.composerBusy;
+  els.sendButton.disabled = !allowWrite || state.composerBusy;
+  els.sendButton.classList.toggle("stop-mode", allowWrite && thinking);
+  els.sendButton.textContent = allowWrite && thinking ? "■" : t("send");
+  els.sendButton.setAttribute("aria-label", allowWrite && thinking ? t("stopCurrentTask") : t("send"));
+  els.sendButton.setAttribute("title", allowWrite && thinking ? t("stopCurrentTask") : t("send"));
   els.composerInput.placeholder = allowWrite ? t("sendToCodex") : t("readonlyPlaceholder");
   if (!allowWrite) els.sendStatus.textContent = t("readonly");
   else if (els.sendStatus.textContent === t("readonly")) els.sendStatus.textContent = "";
@@ -619,6 +632,8 @@ async function loadMessages(force = false) {
   state.loadingMessages = true;
   try {
     const data = await fetchJson(`/api/threads/${state.selectedId}/messages`);
+    state.threadStatus = data.status || null;
+    renderComposerMode();
     const signature = `${data.thread?.updatedAtMs || ""}:${data.size || ""}:${data.mtimeMs || ""}:${state.showTools}:${data.status?.thinking ? "thinking" : "idle"}:${data.status?.turnId || ""}`;
     if (force || signature !== state.messagesSignature) {
       const wasNearBottom =
@@ -660,11 +675,17 @@ async function refresh(forceMessages = false) {
   }
 }
 
+function refreshSoon(delayMs = 700) {
+  setTimeout(() => refresh(true), delayMs);
+}
+
 els.threadList.addEventListener("click", (event) => {
   const button = event.target.closest(".thread-item");
   if (!button) return;
   state.selectedId = button.dataset.id;
   state.messagesSignature = "";
+  state.threadStatus = null;
+  renderComposerMode();
   renderThreads();
   loadMessages(true);
   closeSidebarOnCompact();
@@ -774,20 +795,26 @@ els.composerInput.addEventListener("keydown", (event) => {
 els.composerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.config?.allowWrite) return;
+  if (state.composerBusy) return;
+  const thinking = Boolean(state.threadStatus?.thinking);
   const message = els.composerInput.value.trim();
-  if (!message) return;
-  els.sendButton.disabled = true;
-  els.composerInput.disabled = true;
+  if (!thinking && !message) return;
+  state.composerBusy = true;
+  renderComposerMode();
   els.sendStatus.textContent = "";
   try {
-    await postJson("/api/send", { message, threadId: state.selectedId });
-    els.composerInput.value = "";
-    setTimeout(() => refresh(true), 1200);
+    if (thinking) {
+      await postJson("/api/interrupt", { threadId: state.selectedId });
+      refreshSoon();
+    } else {
+      await postJson("/api/send", { message, threadId: state.selectedId });
+      els.composerInput.value = "";
+      refreshSoon(1200);
+    }
   } catch (error) {
-    els.sendStatus.textContent = t("sendFailed", { message: error.message });
+    els.sendStatus.textContent = t(thinking ? "interruptFailed" : "sendFailed", { message: error.message });
   } finally {
-    els.sendButton.disabled = false;
-    els.composerInput.disabled = false;
+    state.composerBusy = false;
     renderComposerMode();
     els.composerInput.focus();
   }

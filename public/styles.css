@@ -713,6 +713,7 @@ h2 {
 .send-button {
   flex: 0 0 auto;
   min-width: 72px;
+  min-height: 38px;
   border: 1px solid #145b50;
   border-radius: 8px;
   background: var(--accent);
@@ -720,6 +721,18 @@ h2 {
   cursor: pointer;
   font-weight: 650;
   padding: 8px 14px;
+}
+
+.send-button.stop-mode {
+  display: grid;
+  min-width: 42px;
+  width: 42px;
+  place-items: center;
+  border-color: #33302c;
+  background: #33302c;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
 }
 
 .send-button:disabled {
@@ -886,5 +899,11 @@ h2 {
   .send-button {
     min-width: 64px;
     padding: 8px 12px;
+  }
+
+  .send-button.stop-mode {
+    min-width: 40px;
+    width: 40px;
+    padding: 0;
   }
 }

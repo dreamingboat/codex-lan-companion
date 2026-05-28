@@ -88,7 +88,8 @@ const SESSION_INDEX = path.join(CODEX_HOME, "session_index.jsonl");
 const AUTH_FILE = path.join(CODEX_HOME, "auth.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const IPC_VERSION_BY_METHOD = {
-  "thread-follower-start-turn": 1
+  "thread-follower-start-turn": 1,
+  "thread-follower-interrupt-turn": 1
 };
 
 const jsonHeaders = {
@@ -326,6 +327,13 @@ class DesktopCodexIpcClient {
         input: [{ type: "text", text, text_elements: [] }],
         attachments: []
       }
+    });
+  }
+
+  async interruptTurn(threadId) {
+    await this.ensureReady();
+    return this.request("thread-follower-interrupt-turn", {
+      conversationId: threadId
     });
   }
 }
@@ -764,6 +772,42 @@ async function sendToCodex(text, threadId) {
   };
 }
 
+async function interruptCodex(threadId) {
+  if (!ALLOW_WRITE) {
+    const err = new Error("Write mode is disabled. Restart with --write to control Codex Desktop.");
+    err.status = 403;
+    throw err;
+  }
+  const targetThreadId = threadId || (await getThreads())[0]?.id;
+  if (!targetThreadId) {
+    const err = new Error("No target thread selected");
+    err.status = 400;
+    throw err;
+  }
+  if (!(await findThread(targetThreadId))) {
+    const err = new Error("Thread not found");
+    err.status = 404;
+    throw err;
+  }
+
+  try {
+    await getCodexIpcClient().interruptTurn(targetThreadId);
+  } catch (error) {
+    if (error.message === "no-client-found" || error.message.includes("thread-role-timeout")) {
+      const err = new Error("Codex Desktop has no open owner for this thread. Open the target conversation in Codex Desktop, then try again.");
+      err.status = 409;
+      throw err;
+    }
+    throw error;
+  }
+  return {
+    ok: true,
+    mode: "desktop-ipc",
+    threadId: targetThreadId,
+    interruptedAt: new Date().toISOString()
+  };
+}
+
 async function serveStatic(res, pathname) {
   const requested = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, requested));
@@ -811,6 +855,12 @@ const server = http.createServer(async (req, res) => {
       if (!requireAuthorized(req, res, url)) return;
       const body = await readJsonBody(req);
       sendJson(res, 200, await sendToCodex(body.message, body.threadId));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/interrupt") {
+      if (!requireAuthorized(req, res, url)) return;
+      const body = await readJsonBody(req);
+      sendJson(res, 200, await interruptCodex(body.threadId));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/account") {
