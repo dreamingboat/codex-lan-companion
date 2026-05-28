@@ -293,8 +293,7 @@ function renderMessages(data) {
   const selected = state.threads.find((thread) => thread.id === state.selectedId);
   els.threadTitle.textContent = selected?.title || data.thread?.title || "Untitled";
   const statusText = data.status?.thinking ? " · 思考中..." : "";
-  const cwd = data.meta?.cwd || data.thread?.cwd || "";
-  els.threadMeta.textContent = `${data.messages.length} 条内容${statusText}${cwd ? ` · ${cwd}` : ""}`;
+  els.threadMeta.textContent = `${data.messages.length} 条内容${statusText}`;
 
   if (!data.messages.length && !data.status?.thinking) {
     els.messageList.innerHTML = `<div class="empty-state">这个对话暂时没有可展示内容。</div>`;
