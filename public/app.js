@@ -87,12 +87,20 @@ function authHeaders(extra = {}) {
 function showAuthGate(message = "") {
   els.authGate.hidden = false;
   els.authError.textContent = message;
+  renderLockState(false);
   window.setTimeout(() => els.authInput.focus(), 0);
 }
 
 function hideAuthGate() {
   els.authGate.hidden = true;
   els.authError.textContent = "";
+  renderLockState(true);
+}
+
+function renderLockState(unlocked) {
+  els.lockButton.textContent = unlocked ? "🔓" : "🔒";
+  els.lockButton.setAttribute("aria-label", unlocked ? "当前已解锁，点击锁定" : "已锁定");
+  els.lockButton.setAttribute("title", unlocked ? "当前已解锁，点击锁定" : "已锁定");
 }
 
 function lockApp(message = "") {
@@ -285,7 +293,8 @@ function renderMessages(data) {
   const selected = state.threads.find((thread) => thread.id === state.selectedId);
   els.threadTitle.textContent = selected?.title || data.thread?.title || "Untitled";
   const statusText = data.status?.thinking ? " · 思考中..." : "";
-  els.threadMeta.textContent = `${data.messages.length} 条内容${statusText} · ${formatDate(data.thread?.updatedAtMs)} · ${data.meta?.cwd || data.thread?.cwd || ""}`;
+  const cwd = data.meta?.cwd || data.thread?.cwd || "";
+  els.threadMeta.textContent = `${data.messages.length} 条内容${statusText}${cwd ? ` · ${cwd}` : ""}`;
 
   if (!data.messages.length && !data.status?.thinking) {
     els.messageList.innerHTML = `<div class="empty-state">这个对话暂时没有可展示内容。</div>`;
