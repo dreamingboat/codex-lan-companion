@@ -304,15 +304,16 @@ function compact(value, limit = 6000) {
   return `${text.slice(0, limit)}\n\n... truncated ${text.length - limit} chars`;
 }
 
-function messageFromEvent(timestamp, payload) {
+function messageFromEvent(timestamp, payload, meta = {}) {
   if (payload?.type === "user_message") {
-    return { role: "user", kind: "message", timestamp, content: stripCodexDirectives(payload.message) };
+    return { role: "user", kind: "message", timestamp, ...meta, content: stripCodexDirectives(payload.message) };
   }
   if (payload?.type === "agent_message") {
     return {
       role: "assistant",
       kind: "message",
       timestamp,
+      ...meta,
       phase: payload.phase || "",
       content: stripCodexDirectives(payload.message)
     };
@@ -361,6 +362,8 @@ async function parseRollout(filePath) {
   const toolMessages = [];
   let meta = {};
   let lineNumber = 0;
+  let activeTurn = null;
+  const assistantMessagesByTurn = new Map();
 
   const stream = createReadStream(filePath, { encoding: "utf8" });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -375,8 +378,34 @@ async function parseRollout(filePath) {
         continue;
       }
       if (entry.type === "event_msg") {
-        const msg = messageFromEvent(entry.timestamp, entry.payload);
-        if (msg?.content) eventMessages.push({ ...msg, lineNumber });
+        if (entry.payload?.type === "task_started") {
+          activeTurn = {
+            turnId: entry.payload.turn_id || null,
+            startedAtMs: Number(entry.payload.started_at) ? Number(entry.payload.started_at) * 1000 : Date.parse(entry.timestamp)
+          };
+          continue;
+        }
+        if (entry.payload?.type === "task_complete") {
+          const turnId = entry.payload.turn_id || activeTurn?.turnId || null;
+          const durationMs = Number(entry.payload.duration_ms);
+          const completedAtMs = Number(entry.payload.completed_at) ? Number(entry.payload.completed_at) * 1000 : Date.parse(entry.timestamp);
+          if (turnId && assistantMessagesByTurn.has(turnId)) {
+            const message = assistantMessagesByTurn.get(turnId);
+            if (Number.isFinite(durationMs)) message.durationMs = durationMs;
+            if (Number.isFinite(completedAtMs)) message.completedAtMs = completedAtMs;
+          }
+          if (turnId && activeTurn?.turnId === turnId) activeTurn = null;
+          continue;
+        }
+        const msg = messageFromEvent(entry.timestamp, entry.payload, {
+          turnId: activeTurn?.turnId || null,
+          turnStartedAtMs: activeTurn?.startedAtMs || null
+        });
+        if (msg?.content) {
+          const message = { ...msg, lineNumber };
+          eventMessages.push(message);
+          if (message.role === "assistant" && message.turnId) assistantMessagesByTurn.set(message.turnId, message);
+        }
         continue;
       }
       if (entry.type === "response_item") {

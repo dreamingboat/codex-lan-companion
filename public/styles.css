@@ -276,6 +276,20 @@ h2 {
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
 }
 
+.message-meta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.message-meta-top {
+  margin-bottom: 8px;
+}
+
+.message-meta-bottom {
+  margin-top: 10px;
+}
+
 .message.user .bubble {
   background: var(--user);
   border-color: #d5dff1;
@@ -354,9 +368,10 @@ h2 {
 }
 
 .send-status {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: var(--muted);
+  color: #b42318;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;

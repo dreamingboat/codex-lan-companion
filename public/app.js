@@ -38,6 +38,28 @@ function formatDate(ms) {
   }).format(date);
 }
 
+function formatMessageDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return "";
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  if (seconds === 0) return `${minutes}m`;
+  return `${minutes}m${seconds}s`;
+}
+
 function escapeHtml(text) {
   return String(text ?? "")
     .replaceAll("&", "&amp;")
@@ -95,6 +117,21 @@ function roleLabel(message) {
   return message.role || "System";
 }
 
+function messageMetaTop(message, previousUserMessage) {
+  if (message.role === "user") return "已发送";
+  if (message.role === "assistant") {
+    const inferredDuration =
+      message.durationMs ||
+      (previousUserMessage?.timestamp && message.timestamp
+        ? new Date(message.timestamp).getTime() - new Date(previousUserMessage.timestamp).getTime()
+        : 0);
+    const duration = formatDuration(inferredDuration);
+    return duration ? `已处理 ${duration}` : "已处理";
+  }
+  if (message.role === "tool") return message.kind || "工具";
+  return message.kind || "";
+}
+
 function renderMessages(data) {
   const selected = state.threads.find((thread) => thread.id === state.selectedId);
   els.threadTitle.textContent = selected?.title || data.thread?.title || "Untitled";
@@ -105,17 +142,23 @@ function renderMessages(data) {
     return;
   }
 
+  let previousUserMessage = null;
   els.messageList.innerHTML = data.messages
     .map((message) => {
       const isTool = message.role === "tool";
       const hidden = isTool && !state.showTools ? " hidden" : "";
       const title = isTool ? `<div class="tool-title">${escapeHtml(message.kind)} · ${escapeHtml(message.title || "")}</div>` : "";
+      const metaTop = messageMetaTop(message, previousUserMessage);
+      const metaBottom = formatMessageDate(message.completedAtMs || message.timestamp);
+      if (message.role === "user") previousUserMessage = message;
       return `
         <article class="message ${escapeHtml(message.role)}${hidden}">
           <div class="role">${roleLabel(message)}</div>
           <div class="bubble">
+            ${metaTop ? `<div class="message-meta message-meta-top">${escapeHtml(metaTop)}</div>` : ""}
             ${title}
             ${renderMarkdownLite(message.content || "")}
+            ${metaBottom ? `<div class="message-meta message-meta-bottom">${escapeHtml(metaBottom)}</div>` : ""}
           </div>
         </article>
       `;
@@ -227,11 +270,10 @@ els.composerForm.addEventListener("submit", async (event) => {
   if (!message) return;
   els.sendButton.disabled = true;
   els.composerInput.disabled = true;
-  els.sendStatus.textContent = "正在发送到 Codex...";
+  els.sendStatus.textContent = "";
   try {
     await postJson("/api/send", { message, threadId: state.selectedId });
     els.composerInput.value = "";
-    els.sendStatus.textContent = "已发送到 Codex 桌面端，等待对话同步";
     setTimeout(() => refresh(true), 1200);
   } catch (error) {
     els.sendStatus.textContent = `发送失败：${error.message}`;
