@@ -125,6 +125,20 @@ input {
   stroke-width: 1.8;
 }
 
+.remember-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.remember-toggle input {
+  width: 15px;
+  height: 15px;
+}
+
 .auth-button {
   border: 1px solid #145b50;
   border-radius: 8px;

@@ -21,6 +21,10 @@
             </svg>
           </button>
         </div>
+        <label class="remember-toggle">
+          <input id="rememberDevice" type="checkbox" />
+          <span>记住这台设备</span>
+        </label>
         <button id="authButton" class="auth-button" type="submit">进入</button>
         <div id="authError" class="auth-error" aria-live="polite"></div>
       </form>
@@ -52,6 +56,7 @@
             <input id="toolToggle" type="checkbox" />
             <span>工具</span>
           </label>
+          <button id="lockButton" class="icon-button" type="button" title="锁定并清除访问码" aria-label="锁定并清除访问码">⌽</button>
         </header>
         <div id="messageList" class="message-list">
           <div class="empty-state">从左侧选择一个 Codex 对话。</div>

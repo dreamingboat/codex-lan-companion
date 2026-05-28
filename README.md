@@ -56,7 +56,7 @@ Access code: 7f3a91c2
 Mode:   read-only · token protected
 ```
 
-Open the LAN URL from a phone or tablet on the same Wi-Fi. The browser asks for the access code once, stores it locally, and uses it for later API requests.
+Open the LAN URL from a phone or tablet on the same Wi-Fi. The browser asks for the access code. By default the code is remembered only for the current browser session. Check "Remember this device" on the login screen if you want the browser to keep it across restarts.
 
 Enable web-to-Codex input:
 

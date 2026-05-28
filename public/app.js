@@ -24,6 +24,7 @@ const els = {
   sidebarCloseButton: document.querySelector("#sidebarCloseButton"),
   searchInput: document.querySelector("#searchInput"),
   toolToggle: document.querySelector("#toolToggle"),
+  lockButton: document.querySelector("#lockButton"),
   composerForm: document.querySelector("#composerForm"),
   composerInput: document.querySelector("#composerInput"),
   sendButton: document.querySelector("#sendButton"),
@@ -38,18 +39,44 @@ const els = {
   authInput: document.querySelector("#authInput"),
   authButton: document.querySelector("#authButton"),
   authReveal: document.querySelector("#authReveal"),
+  rememberDevice: document.querySelector("#rememberDevice"),
   authError: document.querySelector("#authError")
 };
+
+function safeStorageGet(storage, key) {
+  try {
+    return storage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function safeStorageSet(storage, key, value) {
+  try {
+    storage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable in some mobile privacy modes.
+  }
+}
+
+function safeStorageRemove(storage, key) {
+  try {
+    storage.removeItem(key);
+  } catch {
+    // Storage can be unavailable in some mobile privacy modes.
+  }
+}
 
 function initAuthToken() {
   const url = new URL(window.location.href);
   const token = url.searchParams.get("token");
   if (token) {
-    localStorage.setItem("codexLanToken", token);
+    safeStorageSet(sessionStorage, "codexLanToken", token);
     url.searchParams.delete("token");
     window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
   }
-  state.authToken = localStorage.getItem("codexLanToken") || "";
+  state.authToken = token || safeStorageGet(sessionStorage, "codexLanToken") || safeStorageGet(localStorage, "codexLanToken");
+  els.rememberDevice.checked = Boolean(safeStorageGet(localStorage, "codexLanToken"));
 }
 
 function authHeaders(extra = {}) {
@@ -65,6 +92,19 @@ function showAuthGate(message = "") {
 function hideAuthGate() {
   els.authGate.hidden = true;
   els.authError.textContent = "";
+}
+
+function lockApp(message = "") {
+  safeStorageRemove(sessionStorage, "codexLanToken");
+  safeStorageRemove(localStorage, "codexLanToken");
+  state.authToken = "";
+  state.config = null;
+  state.messagesSignature = "";
+  els.rememberDevice.checked = false;
+  els.authInput.value = "";
+  els.threadCount.textContent = "需要访问码";
+  els.messageList.innerHTML = `<div class="empty-state">请输入访问码后继续。</div>`;
+  showAuthGate(message);
 }
 
 function formatDate(ms) {
@@ -409,10 +449,7 @@ async function refresh(forceMessages = false) {
     await loadMessages(forceMessages);
   } catch (error) {
     if (error.status === 401) {
-      localStorage.removeItem("codexLanToken");
-      state.authToken = "";
-      state.config = null;
-      showAuthGate("访问码不正确，请重新输入。");
+      lockApp("访问码不正确，请重新输入。");
       return;
     }
     els.threadCount.textContent = "同步失败";
@@ -452,6 +489,10 @@ els.toolToggle.addEventListener("change", (event) => {
   loadMessages(true);
 });
 
+els.lockButton.addEventListener("click", () => {
+  lockApp("已锁定，请重新输入访问码。");
+});
+
 els.accountToggle.addEventListener("click", () => {
   state.accountExpanded = !state.accountExpanded;
   renderAccount();
@@ -475,11 +516,9 @@ els.authForm.addEventListener("submit", async (event) => {
     return;
   }
   state.authToken = token;
-  try {
-    localStorage.setItem("codexLanToken", token);
-  } catch {
-    // Some mobile privacy modes may block storage; the in-memory token still works for this tab.
-  }
+  safeStorageSet(sessionStorage, "codexLanToken", token);
+  if (els.rememberDevice.checked) safeStorageSet(localStorage, "codexLanToken", token);
+  else safeStorageRemove(localStorage, "codexLanToken");
   els.authError.textContent = "";
   els.authButton.disabled = true;
   els.authButton.textContent = "验证中";
@@ -489,9 +528,7 @@ els.authForm.addEventListener("submit", async (event) => {
     await loadAccount();
   } catch (error) {
     if (error.status === 401) {
-      localStorage.removeItem("codexLanToken");
-      state.authToken = "";
-      showAuthGate("访问码不正确，请重新输入。");
+      lockApp("访问码不正确，请重新输入。");
       return;
     }
     showAuthGate(error.message);
