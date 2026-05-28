@@ -541,6 +541,12 @@ function renderAccount() {
     : `<div class="usage-empty">${escapeHtml(t("noUsage"))}</div>`;
 }
 
+function closeAccountPanel() {
+  if (!state.accountExpanded) return;
+  state.accountExpanded = false;
+  renderAccount();
+}
+
 async function loadAccount() {
   try {
     state.account = await fetchJson("/api/account");
@@ -711,6 +717,12 @@ els.accountToggle.addEventListener("click", () => {
   state.accountExpanded = !state.accountExpanded;
   renderAccount();
   if (state.accountExpanded) loadAccount();
+});
+
+document.addEventListener("click", (event) => {
+  if (!state.accountExpanded) return;
+  if (els.accountPanel.contains(event.target) || els.accountToggle.contains(event.target)) return;
+  closeAccountPanel();
 });
 
 els.authReveal.addEventListener("click", () => {
