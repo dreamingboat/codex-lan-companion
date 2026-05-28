@@ -71,11 +71,11 @@ function initAuthToken() {
   const url = new URL(window.location.href);
   const token = url.searchParams.get("token");
   if (token) {
-    safeStorageSet(sessionStorage, "codexLanToken", token);
     url.searchParams.delete("token");
     window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
   }
-  state.authToken = token || safeStorageGet(sessionStorage, "codexLanToken") || safeStorageGet(localStorage, "codexLanToken");
+  safeStorageRemove(sessionStorage, "codexLanToken");
+  state.authToken = token || safeStorageGet(localStorage, "codexLanToken");
   els.rememberDevice.checked = Boolean(safeStorageGet(localStorage, "codexLanToken"));
 }
 
@@ -449,7 +449,7 @@ async function refresh(forceMessages = false) {
     await loadMessages(forceMessages);
   } catch (error) {
     if (error.status === 401) {
-      lockApp("访问码不正确，请重新输入。");
+      lockApp(state.authToken ? "访问码不正确，请重新输入。" : "请输入访问码。");
       return;
     }
     els.threadCount.textContent = "同步失败";
@@ -516,7 +516,7 @@ els.authForm.addEventListener("submit", async (event) => {
     return;
   }
   state.authToken = token;
-  safeStorageSet(sessionStorage, "codexLanToken", token);
+  safeStorageRemove(sessionStorage, "codexLanToken");
   if (els.rememberDevice.checked) safeStorageSet(localStorage, "codexLanToken", token);
   else safeStorageRemove(localStorage, "codexLanToken");
   els.authError.textContent = "";
