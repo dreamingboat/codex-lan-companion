@@ -7,7 +7,9 @@ const state = {
   sidebarCollapsed: false,
   loadingMessages: false,
   account: null,
-  accountExpanded: false
+  accountExpanded: false,
+  config: null,
+  authToken: ""
 };
 
 const els = {
@@ -32,6 +34,21 @@ const els = {
   accountToggle: document.querySelector("#accountToggle"),
   accountPanel: document.querySelector("#accountPanel")
 };
+
+function initAuthToken() {
+  const url = new URL(window.location.href);
+  const token = url.searchParams.get("token");
+  if (token) {
+    localStorage.setItem("codexLanToken", token);
+    url.searchParams.delete("token");
+    window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+  }
+  state.authToken = localStorage.getItem("codexLanToken") || "";
+}
+
+function authHeaders(extra = {}) {
+  return state.authToken ? { ...extra, "x-access-token": state.authToken } : extra;
+}
 
 function formatDate(ms) {
   if (!ms) return "";
@@ -140,7 +157,7 @@ function renderSidebarState() {
 
 function roleIcon(message) {
   if (message.role === "assistant") {
-    return `<img class="role-icon-image" src="/assets/codex-app-icon.png" alt="Codex" />`;
+    return `<img class="role-icon-image" src="/assets/companion-mark.svg" alt="Codex" />`;
   }
   if (message.role === "user") {
     return `
@@ -281,7 +298,7 @@ async function loadAccount() {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
+  const response = await fetch(url, { cache: "no-store", headers: authHeaders() });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || response.statusText);
   return data;
@@ -290,12 +307,26 @@ async function fetchJson(url) {
 async function postJson(url, body) {
   const response = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: authHeaders({ "content-type": "application/json" }),
     body: JSON.stringify(body)
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || response.statusText);
   return data;
+}
+
+function renderComposerMode() {
+  const allowWrite = Boolean(state.config?.allowWrite);
+  els.composerInput.disabled = !allowWrite;
+  els.sendButton.disabled = !allowWrite;
+  els.composerInput.placeholder = allowWrite ? "发送到当前 Codex 窗口" : "只读模式：启动时加 --write 才能发送";
+  if (!allowWrite) els.sendStatus.textContent = "只读模式";
+  else if (els.sendStatus.textContent === "只读模式") els.sendStatus.textContent = "";
+}
+
+async function loadConfig() {
+  state.config = await fetchJson("/api/health");
+  renderComposerMode();
 }
 
 async function loadThreads() {
@@ -331,11 +362,13 @@ async function loadMessages(force = false) {
 
 async function refresh(forceMessages = false) {
   try {
+    if (!state.config) await loadConfig();
     await loadThreads();
     await loadMessages(forceMessages);
   } catch (error) {
     els.threadCount.textContent = "同步失败";
-    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    const authHint = error.message === "Unauthorized" ? "访问令牌无效或缺失。请使用启动终端里带 token 的地址打开。" : error.message;
+    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(authHint)}</div>`;
   }
 }
 
@@ -386,6 +419,7 @@ els.composerInput.addEventListener("keydown", (event) => {
 
 els.composerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!state.config?.allowWrite) return;
   const message = els.composerInput.value.trim();
   if (!message) return;
   els.sendButton.disabled = true;
@@ -400,10 +434,12 @@ els.composerForm.addEventListener("submit", async (event) => {
   } finally {
     els.sendButton.disabled = false;
     els.composerInput.disabled = false;
+    renderComposerMode();
     els.composerInput.focus();
   }
 });
 
+initAuthToken();
 renderSidebarState();
 refresh(true);
 loadAccount();

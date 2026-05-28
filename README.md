@@ -1,52 +1,133 @@
-# Codex LAN Viewer
+# Codex LAN Companion
 
-本地只读 Web Service，用浏览器查看当前机器上的 Codex 对话列表和对话内容。
+Codex LAN Companion is a small self-hosted web service for viewing Codex Desktop conversations from another device on the same LAN. It is designed for local/home-network use: start it on your Mac, scan the terminal QR code, and open the companion UI from your phone browser.
 
-## 运行
+This is an unofficial tool. It reads local Codex Desktop state and uses local Codex Desktop IPC only when write mode is explicitly enabled.
+
+## Features
+
+- LAN browser UI for Codex Desktop conversations
+- Mobile-friendly conversation list and message view
+- Live-ish sync, including an active "thinking" indicator
+- Account and local plan-usage summary when available from Codex local state
+- Token-protected API by default
+- Read-only by default
+- Optional `--write` mode for sending messages back to Codex Desktop
+- Terminal QR code for quick phone access
+
+## Install
+
+From a cloned repo:
 
 ```bash
+npm install
 npm start
 ```
 
-默认监听：
-
-```text
-http://0.0.0.0:8787
-```
-
-同一局域网的设备访问：
-
-```text
-http://你的Mac局域网IP:8787
-```
-
-可以用环境变量修改：
+As an npm package after publishing:
 
 ```bash
-PORT=9000 HOST=0.0.0.0 CODEX_HOME="$HOME/.codex" npm start
+npx codex-lan-companion
 ```
 
-## 数据来源
-
-- 对话列表：`$CODEX_HOME/state_5.sqlite` 的 `threads` 表
-- 对话内容：`$CODEX_HOME/sessions/**/rollout-*.jsonl`
-
-网页每 3 秒自动同步一次。第一版是只读，不会向 Codex 写入内容。
-
-## 实验输入功能
-
-页面底部有输入框，可以把文本发送到当前选中的 Codex 对话。当前版本接入 Codex Desktop 自己的本机 IPC socket，使用桌面端内部的 `thread-follower-start-turn` 桥接请求，由桌面窗口里的 owner 会话代发消息。
-
-默认 IPC socket：
-
-```text
-$TMPDIR/codex-ipc/ipc-$UID.sock
-```
-
-可以用环境变量覆盖：
+or:
 
 ```bash
-CODEX_IPC_SOCKET="/path/to/ipc.sock" npm start
+npm install -g codex-lan-companion
+codex-lan-companion
 ```
 
-这个方式不会激活 Codex 窗口，也不会改写剪贴板。发送后，Codex Desktop 主界面和网页都会通过同一个桌面会话流更新；网页仍继续通过本地 JSONL 文件轮询显示真实对话内容。
+## Usage
+
+Default mode is read-only and token-protected:
+
+```bash
+codex-lan-companion
+```
+
+The terminal prints local and LAN URLs like:
+
+```text
+Codex LAN Companion is running
+Local:  http://127.0.0.1:8787/?token=...
+LAN:    http://10.0.0.131:8787/?token=...
+Mode:   read-only · token protected
+```
+
+Open the LAN URL from a phone or tablet on the same Wi-Fi. The page stores the token in browser local storage and removes it from the address bar.
+
+Enable web-to-Codex input:
+
+```bash
+codex-lan-companion --write
+```
+
+Choose a port or fixed token:
+
+```bash
+codex-lan-companion --port 8790 --token home-only
+```
+
+Disable auth only on a trusted local network:
+
+```bash
+codex-lan-companion --no-auth
+```
+
+## Options
+
+```text
+--host <host>          Bind host. Default: 0.0.0.0
+--port <port>          Bind port. Default: 8787
+--token <token>        Access token. Default: generated per launch
+--write                Enable sending messages to Codex Desktop
+--readonly             Force read-only mode. Default
+--no-auth              Disable access token guard
+--codex-home <path>    Codex data directory. Default: ~/.codex
+--ipc-socket <path>    Codex Desktop IPC socket override
+-h, --help             Show help
+```
+
+Environment variables are also supported:
+
+```bash
+PORT=8790 HOST=0.0.0.0 CODEX_LAN_TOKEN=home-only CODEX_LAN_ALLOW_WRITE=1 codex-lan-companion
+```
+
+## Requirements
+
+- macOS
+- Codex Desktop installed and logged in
+- Node.js 18+
+- Phone and Mac on the same LAN
+- `sqlite3` available on the Mac
+
+Write mode additionally requires Codex Desktop to be running with the target conversation available to the desktop app.
+
+## Data Sources
+
+- Conversation list: `$CODEX_HOME/state_5.sqlite`
+- Conversation content: `$CODEX_HOME/sessions/**/rollout-*.jsonl`
+- Optional account display: `$CODEX_HOME/auth.json`, decoded locally without returning tokens
+- Optional send support: Codex Desktop local IPC socket
+
+The server never returns Codex auth tokens to the browser.
+
+## Security Notes
+
+This service exposes local Codex conversation titles, messages, tool output, project paths, and account display information to anyone who can access the URL and token. Use it only on networks you trust.
+
+Recommended defaults:
+
+- Keep token auth enabled.
+- Keep read-only mode unless you need phone input.
+- Do not expose the port to the public internet.
+- Use a fixed token only if you can keep it private.
+
+## Stability Notes
+
+This project depends on Codex Desktop local files and private IPC behavior. Those are not public compatibility contracts and may change in future Codex releases.
+
+## Trademark Note
+
+This is an unofficial companion project and is not affiliated with OpenAI. The bundled UI mark is original project artwork, not an OpenAI or Codex app icon.

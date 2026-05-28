@@ -1,12 +1,27 @@
 {
-  "name": "codex-lan-viewer",
+  "name": "codex-lan-companion",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "description": "LAN-only browser companion for viewing and lightly controlling Codex Desktop.",
   "type": "module",
-  "scripts": {
-    "start": "node server.js"
+  "bin": {
+    "codex-lan-companion": "./server.js"
   },
+  "scripts": {
+    "start": "node server.js",
+    "start:write": "node server.js --write"
+  },
+  "keywords": [
+    "codex",
+    "lan",
+    "remote",
+    "companion"
+  ],
+  "license": "MIT",
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
   }
 }

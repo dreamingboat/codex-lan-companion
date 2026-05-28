@@ -1,5 +1,6 @@
+#!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, promises as fs } from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -7,12 +8,72 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import qrcode from "qrcode-terminal";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-const HOST = process.env.HOST || "0.0.0.0";
-const PORT = Number(process.env.PORT || 8787);
+
+function parseCliArgs(argv) {
+  const options = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    const [flag, inlineValue] = arg.split("=", 2);
+    const nextValue = () => inlineValue ?? argv[++index];
+    if (flag === "--help" || flag === "-h") options.help = true;
+    else if (flag === "--host") options.host = nextValue();
+    else if (flag === "--port") options.port = nextValue();
+    else if (flag === "--token") options.token = nextValue();
+    else if (flag === "--codex-home") options.codexHome = nextValue();
+    else if (flag === "--ipc-socket") options.ipcSocket = nextValue();
+    else if (flag === "--write") options.write = true;
+    else if (flag === "--readonly") options.readonly = true;
+    else if (flag === "--no-auth") options.noAuth = true;
+    else if (arg) {
+      console.error(`Unknown option: ${arg}`);
+      options.help = true;
+      options.invalid = true;
+    }
+  }
+  return options;
+}
+
+function printHelp() {
+  console.log(`Codex LAN Companion
+
+Usage:
+  codex-lan-companion [options]
+
+Options:
+  --host <host>          Bind host. Default: 0.0.0.0
+  --port <port>          Bind port. Default: 8787
+  --token <token>        Access token. Default: generated per launch
+  --write                Enable sending messages to Codex Desktop
+  --readonly             Force read-only mode. Default
+  --no-auth              Disable access token guard
+  --codex-home <path>    Codex data directory. Default: ~/.codex
+  --ipc-socket <path>    Codex Desktop IPC socket override
+  -h, --help             Show this help
+
+Examples:
+  codex-lan-companion
+  codex-lan-companion --write
+  codex-lan-companion --port 8790 --token home-only
+`);
+}
+
+const cli = parseCliArgs(process.argv.slice(2));
+if (cli.help) {
+  printHelp();
+  process.exit(cli.invalid ? 1 : 0);
+}
+
+const CODEX_HOME = cli.codexHome || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+const HOST = cli.host || process.env.HOST || "0.0.0.0";
+const PORT = Number(cli.port || process.env.PORT || 8787);
+const AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
+const ACCESS_TOKEN = cli.token || process.env.CODEX_LAN_TOKEN || randomBytes(18).toString("base64url");
+const ALLOW_WRITE = cli.readonly ? false : Boolean(cli.write || process.env.CODEX_LAN_ALLOW_WRITE === "1" || process.env.CODEX_ALLOW_WRITE === "1");
 const CODEX_IPC_SOCKET =
+  cli.ipcSocket ||
   process.env.CODEX_IPC_SOCKET ||
   (process.platform === "win32"
     ? String.raw`\\.\pipe\codex-ipc`
@@ -42,6 +103,25 @@ function sendJson(res, status, body) {
 function sendText(res, status, text) {
   res.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
   res.end(text);
+}
+
+function requestToken(req, url) {
+  const header = req.headers["x-access-token"] || req.headers.authorization;
+  if (Array.isArray(header)) return header[0] || "";
+  if (typeof header === "string" && header.toLowerCase().startsWith("bearer ")) return header.slice(7);
+  if (typeof header === "string") return header;
+  return url.searchParams.get("token") || "";
+}
+
+function isAuthorized(req, url) {
+  if (!AUTH_REQUIRED) return true;
+  return requestToken(req, url) === ACCESS_TOKEN;
+}
+
+function requireAuthorized(req, res, url) {
+  if (isAuthorized(req, url)) return true;
+  sendJson(res, 401, { error: "Unauthorized", authRequired: true });
+  return false;
 }
 
 function runSqlJson(sql) {
@@ -601,6 +681,11 @@ async function getMessages(id) {
 }
 
 async function sendToCodex(text, threadId) {
+  if (!ALLOW_WRITE) {
+    const err = new Error("Write mode is disabled. Restart with --write to send messages to Codex Desktop.");
+    err.status = 403;
+    throw err;
+  }
   const trimmed = String(text || "").trim();
   if (!trimmed) {
     const err = new Error("Message is empty");
@@ -675,24 +760,36 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   try {
     if (req.method === "GET" && url.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, codexHome: CODEX_HOME, codexIpcSocket: CODEX_IPC_SOCKET, now: new Date().toISOString() });
+      if (!requireAuthorized(req, res, url)) return;
+      sendJson(res, 200, {
+        ok: true,
+        codexHome: CODEX_HOME,
+        codexIpcSocket: CODEX_IPC_SOCKET,
+        authRequired: AUTH_REQUIRED,
+        allowWrite: ALLOW_WRITE,
+        now: new Date().toISOString()
+      });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/send") {
+      if (!requireAuthorized(req, res, url)) return;
       const body = await readJsonBody(req);
       sendJson(res, 200, await sendToCodex(body.message, body.threadId));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/account") {
+      if (!requireAuthorized(req, res, url)) return;
       sendJson(res, 200, await getAccountInfo());
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/threads") {
+      if (!requireAuthorized(req, res, url)) return;
       sendJson(res, 200, { threads: await getThreads() });
       return;
     }
     const match = url.pathname.match(/^\/api\/threads\/([0-9a-fA-F-]{20,})\/messages$/);
     if (req.method === "GET" && match) {
+      if (!requireAuthorized(req, res, url)) return;
       sendJson(res, 200, await getMessages(match[1]));
       return;
     }
@@ -707,6 +804,19 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Codex LAN Viewer listening on http://${HOST}:${PORT}`);
-  console.log(`CODEX_HOME=${CODEX_HOME}`);
+  const tokenQuery = AUTH_REQUIRED ? `?token=${encodeURIComponent(ACCESS_TOKEN)}` : "";
+  const localUrl = `http://127.0.0.1:${PORT}/${tokenQuery}`;
+  const lanUrls = Object.values(os.networkInterfaces())
+    .flat()
+    .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
+    .map((entry) => `http://${entry.address}:${PORT}/${tokenQuery}`);
+  const primaryUrl = lanUrls[0] || localUrl;
+
+  console.log("Codex LAN Companion is running");
+  console.log(`Local:  ${localUrl}`);
+  for (const lanUrl of lanUrls) console.log(`LAN:    ${lanUrl}`);
+  console.log(`Mode:   ${ALLOW_WRITE ? "write enabled" : "read-only"}${AUTH_REQUIRED ? " · token protected" : " · auth disabled"}`);
+  console.log(`Data:   ${CODEX_HOME}`);
+  console.log("");
+  qrcode.generate(primaryUrl, { small: true });
 });
