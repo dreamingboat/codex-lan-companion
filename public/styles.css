@@ -252,10 +252,10 @@ h2 {
 
 .message {
   display: grid;
-  grid-template-columns: 48px minmax(0, 820px);
+  grid-template-columns: 92px minmax(0, 820px);
   gap: 12px;
   margin: 0 auto 14px;
-  max-width: 996px;
+  max-width: 1040px;
 }
 
 .role {
@@ -265,9 +265,19 @@ h2 {
   padding-top: 10px;
 }
 
+.role-badge {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  color: var(--muted);
+}
+
 .role-icon-image,
 .role-icon-svg,
 .role-icon-fallback {
+  flex: 0 0 auto;
   display: block;
   width: 24px;
   height: 24px;
@@ -296,6 +306,15 @@ h2 {
   font-size: 9px;
   font-weight: 700;
   line-height: 1;
+}
+
+.role-text {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bubble {
@@ -642,6 +661,10 @@ h2 {
   .role {
     justify-content: flex-start;
     padding-top: 0;
+  }
+
+  .role-badge {
+    justify-content: flex-start;
   }
 
   .role-icon-image,
