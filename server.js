@@ -568,6 +568,11 @@ async function parseRollout(filePath) {
     file: filePath,
     size: stat.size,
     mtimeMs: stat.mtimeMs,
+    status: {
+      thinking: Boolean(activeTurn),
+      turnId: activeTurn?.turnId || null,
+      startedAtMs: activeTurn?.startedAtMs || null
+    },
     messages: [...chatMessages, ...toolMessages].sort((a, b) => {
       if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
       return a.lineNumber - b.lineNumber;

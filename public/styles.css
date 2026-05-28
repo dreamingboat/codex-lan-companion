@@ -304,6 +304,33 @@ h2 {
   display: none;
 }
 
+.thinking-bubble {
+  color: var(--muted);
+}
+
+.thinking-bubble p {
+  display: inline-flex;
+  align-items: baseline;
+}
+
+.thinking-dots::after {
+  display: inline-block;
+  width: 1.5em;
+  content: "...";
+  animation: thinking-dots 1.1s steps(4, end) infinite;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+
+@keyframes thinking-dots {
+  0% {
+    width: 0;
+  }
+  100% {
+    width: 1.5em;
+  }
+}
+
 .bubble pre {
   overflow: auto;
   margin: 8px 0;

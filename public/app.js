@@ -163,15 +163,16 @@ function messageMetaTop(message, previousUserMessage) {
 function renderMessages(data) {
   const selected = state.threads.find((thread) => thread.id === state.selectedId);
   els.threadTitle.textContent = selected?.title || data.thread?.title || "Untitled";
-  els.threadMeta.textContent = `${data.messages.length} 条内容 · ${formatDate(data.thread?.updatedAtMs)} · ${data.meta?.cwd || data.thread?.cwd || ""}`;
+  const statusText = data.status?.thinking ? " · 思考中..." : "";
+  els.threadMeta.textContent = `${data.messages.length} 条内容${statusText} · ${formatDate(data.thread?.updatedAtMs)} · ${data.meta?.cwd || data.thread?.cwd || ""}`;
 
-  if (!data.messages.length) {
+  if (!data.messages.length && !data.status?.thinking) {
     els.messageList.innerHTML = `<div class="empty-state">这个对话暂时没有可展示内容。</div>`;
     return;
   }
 
   let previousUserMessage = null;
-  els.messageList.innerHTML = data.messages
+  const messageHtml = data.messages
     .map((message) => {
       const isTool = message.role === "tool";
       const hidden = isTool && !state.showTools ? " hidden" : "";
@@ -192,6 +193,18 @@ function renderMessages(data) {
       `;
     })
     .join("");
+  const thinkingHtml = data.status?.thinking
+    ? `
+      <article class="message assistant thinking-message">
+        <div class="role">Codex</div>
+        <div class="bubble thinking-bubble">
+          <div class="message-meta message-meta-top">正在处理</div>
+          <p>思考中<span class="thinking-dots" aria-hidden="true"></span></p>
+        </div>
+      </article>
+    `
+    : "";
+  els.messageList.innerHTML = `${messageHtml}${thinkingHtml}`;
 }
 
 function usageLine(label, window) {
@@ -284,7 +297,7 @@ async function loadMessages(force = false) {
   state.loadingMessages = true;
   try {
     const data = await fetchJson(`/api/threads/${state.selectedId}/messages`);
-    const signature = `${data.thread?.updatedAtMs || ""}:${data.size || ""}:${data.mtimeMs || ""}:${state.showTools}`;
+    const signature = `${data.thread?.updatedAtMs || ""}:${data.size || ""}:${data.mtimeMs || ""}:${state.showTools}:${data.status?.thinking ? "thinking" : "idle"}:${data.status?.turnId || ""}`;
     if (force || signature !== state.messagesSignature) {
       const wasNearBottom =
         els.messageList.scrollHeight - els.messageList.scrollTop - els.messageList.clientHeight < 120;
@@ -379,5 +392,6 @@ els.composerForm.addEventListener("submit", async (event) => {
 renderSidebarState();
 refresh(true);
 loadAccount();
-setInterval(() => refresh(false), 3000);
+setInterval(() => loadThreads(), 3000);
+setInterval(() => loadMessages(false), 1000);
 setInterval(() => loadAccount(), 30000);
