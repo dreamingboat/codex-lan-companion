@@ -420,6 +420,13 @@ async function loadThreads() {
   renderThreads();
 }
 
+function renderTransientSyncError(error) {
+  const selected = state.threads.find((thread) => thread.id === state.selectedId);
+  const title = selected?.title || els.threadTitle.textContent || "选择一个对话";
+  els.threadTitle.textContent = title;
+  els.threadMeta.textContent = `同步暂时失败 · ${error.message}`;
+}
+
 async function loadMessages(force = false) {
   if (!state.selectedId || state.loadingMessages) return;
   state.loadingMessages = true;
@@ -436,7 +443,12 @@ async function loadMessages(force = false) {
       }
     }
   } catch (error) {
-    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    if (error.status === 401) throw error;
+    if (state.messagesSignature) {
+      renderTransientSyncError(error);
+    } else {
+      els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    }
   } finally {
     state.loadingMessages = false;
   }
@@ -453,7 +465,11 @@ async function refresh(forceMessages = false) {
       return;
     }
     els.threadCount.textContent = "同步失败";
-    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    if (state.threads.length || state.messagesSignature) {
+      renderTransientSyncError(error);
+    } else {
+      els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    }
   }
 }
 

@@ -96,6 +96,7 @@ const jsonHeaders = {
 const messageCache = new Map();
 let codexIpcClient = null;
 let accountCache = null;
+let sqliteQueue = Promise.resolve();
 
 function sendJson(res, status, body) {
   res.writeHead(status, jsonHeaders);
@@ -126,9 +127,17 @@ function requireAuthorized(req, res, url) {
   return false;
 }
 
-function runSqlJson(sql) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isSqliteLocked(error) {
+  return String(error?.message || error || "").toLowerCase().includes("database is locked");
+}
+
+function runSqlJsonAttempt(sql) {
   return new Promise((resolve, reject) => {
-    execFile("sqlite3", ["-json", STATE_DB, sql], { maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile("sqlite3", ["-json", "-cmd", ".timeout 5000", STATE_DB, sql], { maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(stderr || error.message));
         return;
@@ -140,6 +149,25 @@ function runSqlJson(sql) {
       }
     });
   });
+}
+
+function runSqlJson(sql) {
+  const work = async () => {
+    let lastError;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        return await runSqlJsonAttempt(sql);
+      } catch (error) {
+        lastError = error;
+        if (!isSqliteLocked(error)) throw error;
+        await sleep(150 * (attempt + 1));
+      }
+    }
+    throw lastError;
+  };
+  const next = sqliteQueue.then(work, work);
+  sqliteQueue = next.catch(() => {});
+  return next;
 }
 
 async function readJsonBody(req, limit = 128 * 1024) {
