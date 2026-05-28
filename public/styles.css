@@ -239,7 +239,7 @@ h2 {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 22px;
+  padding: 22px 22px 14px;
   overscroll-behavior: contain;
 }
 
@@ -319,6 +319,66 @@ h2 {
   font-weight: 700;
 }
 
+.composer {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.9);
+  padding: 12px 22px 14px;
+}
+
+.composer-input {
+  width: 100%;
+  max-height: 170px;
+  min-height: 52px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  line-height: 1.45;
+  outline: none;
+  padding: 10px 12px;
+}
+
+.composer-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.send-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.send-button {
+  flex: 0 0 auto;
+  min-width: 72px;
+  border: 1px solid #145b50;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 650;
+  padding: 8px 14px;
+}
+
+.send-button:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
 @media (max-width: 760px) {
   .shell {
     grid-template-columns: 1fr;
@@ -379,7 +439,7 @@ h2 {
   }
 
   .message-list {
-    padding: 14px;
+    padding: 14px 14px 10px;
   }
 
   .message {
@@ -390,5 +450,24 @@ h2 {
   .role {
     padding-top: 0;
     text-align: left;
+  }
+
+  .composer {
+    padding: 10px 12px 12px;
+  }
+
+  .composer-input {
+    max-height: 120px;
+    min-height: 46px;
+    padding: 9px 10px;
+  }
+
+  .composer-actions {
+    gap: 8px;
+  }
+
+  .send-button {
+    min-width: 64px;
+    padding: 8px 12px;
   }
 }

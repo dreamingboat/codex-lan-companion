@@ -38,6 +38,19 @@
         <div id="messageList" class="message-list">
           <div class="empty-state">从左侧选择一个 Codex 对话。</div>
         </div>
+        <form id="composerForm" class="composer">
+          <textarea
+            id="composerInput"
+            class="composer-input"
+            rows="2"
+            placeholder="发送到当前 Codex 窗口"
+            autocomplete="off"
+          ></textarea>
+          <div class="composer-actions">
+            <span id="sendStatus" class="send-status">实验功能：会发送到当前打开的 Codex 对话</span>
+            <button id="sendButton" class="send-button" type="submit">发送</button>
+          </div>
+        </form>
       </section>
     </main>
     <script src="/app.js" type="module"></script>

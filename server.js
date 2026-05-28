@@ -10,6 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8787);
+const CODEX_APP_NAME = process.env.CODEX_APP_NAME || "Codex";
 const STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const SESSION_INDEX = path.join(CODEX_HOME, "session_index.jsonl");
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -45,6 +46,40 @@ function runSqlJson(sql) {
       }
     });
   });
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = execFile(command, args, { maxBuffer: 2 * 1024 * 1024, ...options }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr || error.message));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    if (options.input !== undefined) {
+      child.stdin.end(options.input);
+    }
+  });
+}
+
+async function readJsonBody(req, limit = 128 * 1024) {
+  let body = "";
+  for await (const chunk of req) {
+    body += chunk;
+    if (Buffer.byteLength(body) > limit) {
+      const err = new Error("Request body too large");
+      err.status = 413;
+      throw err;
+    }
+  }
+  try {
+    return body ? JSON.parse(body) : {};
+  } catch {
+    const err = new Error("Invalid JSON body");
+    err.status = 400;
+    throw err;
+  }
 }
 
 function sqlString(value) {
@@ -258,6 +293,41 @@ async function getMessages(id) {
   return { thread, ...parsed };
 }
 
+async function sendToCodex(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) {
+    const err = new Error("Message is empty");
+    err.status = 400;
+    throw err;
+  }
+  if (trimmed.length > 12000) {
+    const err = new Error("Message is too long");
+    err.status = 400;
+    throw err;
+  }
+
+  await runCommand("pbcopy", [], { input: trimmed });
+  const script = `
+    on run argv
+      set appName to item 1 of argv
+      tell application appName to activate
+      delay 0.35
+      tell application "System Events"
+        if not (exists process appName) then error "Codex process not found"
+        tell process appName
+          set frontmost to true
+          delay 0.15
+          keystroke "v" using command down
+          delay 0.12
+          key code 36
+        end tell
+      end tell
+    end run
+  `;
+  await runCommand("osascript", ["-e", script, CODEX_APP_NAME]);
+  return { ok: true, target: CODEX_APP_NAME, sentAt: new Date().toISOString() };
+}
+
 async function serveStatic(res, pathname) {
   const requested = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, requested));
@@ -289,6 +359,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && url.pathname === "/api/health") {
       sendJson(res, 200, { ok: true, codexHome: CODEX_HOME, now: new Date().toISOString() });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/send") {
+      const body = await readJsonBody(req);
+      sendJson(res, 200, await sendToCodex(body.message));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/threads") {

@@ -19,7 +19,11 @@ const els = {
   sidebarToggle: document.querySelector("#sidebarToggle"),
   sidebarCloseButton: document.querySelector("#sidebarCloseButton"),
   searchInput: document.querySelector("#searchInput"),
-  toolToggle: document.querySelector("#toolToggle")
+  toolToggle: document.querySelector("#toolToggle"),
+  composerForm: document.querySelector("#composerForm"),
+  composerInput: document.querySelector("#composerInput"),
+  sendButton: document.querySelector("#sendButton"),
+  sendStatus: document.querySelector("#sendStatus")
 };
 
 function formatDate(ms) {
@@ -126,6 +130,17 @@ async function fetchJson(url) {
   return data;
 }
 
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
 async function loadThreads() {
   const data = await fetchJson("/api/threads");
   state.threads = data.threads || [];
@@ -197,6 +212,34 @@ els.toolToggle.addEventListener("change", (event) => {
   state.showTools = event.target.checked;
   state.messagesSignature = "";
   loadMessages(true);
+});
+
+els.composerInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    els.composerForm.requestSubmit();
+  }
+});
+
+els.composerForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const message = els.composerInput.value.trim();
+  if (!message) return;
+  els.sendButton.disabled = true;
+  els.composerInput.disabled = true;
+  els.sendStatus.textContent = "正在发送到 Codex...";
+  try {
+    await postJson("/api/send", { message });
+    els.composerInput.value = "";
+    els.sendStatus.textContent = "已发送，等待 Codex 写入对话";
+    setTimeout(() => refresh(true), 1200);
+  } catch (error) {
+    els.sendStatus.textContent = `发送失败：${error.message}`;
+  } finally {
+    els.sendButton.disabled = false;
+    els.composerInput.disabled = false;
+    els.composerInput.focus();
+  }
 });
 
 renderSidebarState();
