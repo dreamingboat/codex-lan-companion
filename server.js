@@ -1,6 +1,8 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createReadStream, existsSync, promises as fs } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -10,10 +12,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8787);
-const CODEX_BIN = process.env.CODEX_BIN || "/Applications/Codex.app/Contents/Resources/codex";
+const CODEX_IPC_SOCKET =
+  process.env.CODEX_IPC_SOCKET ||
+  (process.platform === "win32"
+    ? String.raw`\\.\pipe\codex-ipc`
+    : path.join(os.tmpdir(), "codex-ipc", typeof process.getuid === "function" ? `ipc-${process.getuid()}.sock` : "ipc.sock"));
 const STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const SESSION_INDEX = path.join(CODEX_HOME, "session_index.jsonl");
 const PUBLIC_DIR = path.join(__dirname, "public");
+const IPC_VERSION_BY_METHOD = {
+  "thread-follower-start-turn": 1
+};
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -21,7 +30,7 @@ const jsonHeaders = {
 };
 
 const messageCache = new Map();
-let codexClient = null;
+let codexIpcClient = null;
 
 function sendJson(res, status, body) {
   res.writeHead(status, jsonHeaders);
@@ -68,113 +77,145 @@ async function readJsonBody(req, limit = 128 * 1024) {
   }
 }
 
-class CodexAppServerClient {
+class DesktopCodexIpcClient {
   constructor() {
-    this.child = null;
-    this.rl = null;
-    this.nextId = 1;
+    this.socket = null;
+    this.buffer = Buffer.alloc(0);
     this.pending = new Map();
     this.ready = null;
-    this.loadedThreads = new Set();
+    this.clientId = null;
   }
 
   async ensureReady() {
-    if (this.child && !this.child.killed && this.ready) {
+    if (this.socket?.writable && this.ready) {
       return this.ready;
     }
-    this.start();
-    this.ready = this.initialize();
+    this.ready = this.connect();
     return this.ready;
   }
 
-  start() {
-    this.child = spawn(CODEX_BIN, ["app-server", "--listen", "stdio://"], {
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-    this.loadedThreads.clear();
+  async connect() {
+    if (process.platform !== "win32" && !existsSync(CODEX_IPC_SOCKET)) {
+      throw new Error(`Codex desktop IPC socket not found: ${CODEX_IPC_SOCKET}`);
+    }
+    this.buffer = Buffer.alloc(0);
     this.pending.clear();
+    this.clientId = null;
 
-    this.rl = readline.createInterface({ input: this.child.stdout });
-    this.rl.on("line", (line) => this.handleLine(line));
-    this.child.stderr.on("data", () => {
-      // Codex app-server emits plugin startup warnings on stderr; they are not actionable here.
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection(CODEX_IPC_SOCKET);
+      const fail = (error) => {
+        socket.destroy();
+        reject(error);
+      };
+      socket.once("connect", () => {
+        socket.off("error", fail);
+        resolve();
+      });
+      socket.once("error", fail);
+      this.socket = socket;
     });
-    this.child.on("exit", () => {
-      for (const { reject } of this.pending.values()) {
-        reject(new Error("Codex app-server exited"));
-      }
-      this.pending.clear();
-      this.loadedThreads.clear();
-      this.ready = null;
-      this.child = null;
-      this.rl = null;
-    });
+
+    this.socket.on("data", (chunk) => this.handleData(chunk));
+    this.socket.on("error", (error) => this.reset(error));
+    this.socket.on("close", () => this.reset(new Error("Codex desktop IPC connection closed")));
+
+    const response = await this.request("initialize", { clientType: "webcontrolui" }, { includeVersion: false });
+    if (response.resultType !== "success") {
+      throw new Error(response.error || "Codex desktop IPC initialize failed");
+    }
+    this.clientId = response.result?.clientId || null;
+    return response;
   }
 
-  handleLine(line) {
-    if (!line.trim()) return;
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
+  reset(error) {
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    this.pending.clear();
+    this.ready = null;
+    this.socket = null;
+    this.buffer = Buffer.alloc(0);
+    this.clientId = null;
+  }
+
+  encode(message) {
+    const payload = Buffer.from(JSON.stringify(message), "utf8");
+    const header = Buffer.alloc(4);
+    header.writeUInt32LE(payload.length, 0);
+    return Buffer.concat([header, payload]);
+  }
+
+  handleData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (this.buffer.length >= 4) {
+      const length = this.buffer.readUInt32LE(0);
+      if (this.buffer.length < 4 + length) return;
+      const payload = this.buffer.subarray(4, 4 + length).toString("utf8");
+      this.buffer = this.buffer.subarray(4 + length);
+      try {
+        this.handleMessage(JSON.parse(payload));
+      } catch {
+        // Ignore malformed frames from experimental desktop IPC.
+      }
+    }
+  }
+
+  handleMessage(message) {
+    if (message.type !== "response" || !message.requestId) return;
+    const pending = this.pending.get(message.requestId);
+    if (!pending) return;
+    this.pending.delete(message.requestId);
+    clearTimeout(pending.timer);
+    if (message.resultType === "error") {
+      pending.reject(new Error(message.error || `${message.method || "IPC request"} failed`));
       return;
     }
-    if (!message.id) return;
-    const pending = this.pending.get(message.id);
-    if (!pending) return;
-    this.pending.delete(message.id);
-    if (message.error) {
-      pending.reject(new Error(message.error.message || "Codex app-server request failed"));
-    } else {
-      pending.resolve(message.result);
-    }
+    pending.resolve(message);
   }
 
-  request(method, params = {}) {
+  request(method, params = {}, { includeVersion = true, timeoutMs = 12000 } = {}) {
     return new Promise((resolve, reject) => {
-      if (!this.child?.stdin?.writable) {
-        reject(new Error("Codex app-server is not running"));
+      if (!this.socket?.writable) {
+        reject(new Error("Codex desktop IPC is not connected"));
         return;
       }
-      const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
-      this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      const requestId = randomUUID();
+      const message = {
+        type: "request",
+        requestId,
+        sourceClientId: this.clientId || undefined,
+        method,
+        params
+      };
+      if (includeVersion) {
+        message.version = IPC_VERSION_BY_METHOD[method] ?? 0;
+      }
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId);
+        reject(new Error(`${method} timed out`));
+      }, timeoutMs);
+      this.pending.set(requestId, { resolve, reject, timer });
+      this.socket.write(this.encode(message));
     });
-  }
-
-  notify(method, params = {}) {
-    if (this.child?.stdin?.writable) {
-      this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
-    }
-  }
-
-  async initialize() {
-    await this.request("initialize", {
-      clientInfo: { name: "WebControlUI", version: "0.3.0" },
-      capabilities: { experimental: true }
-    });
-    this.notify("initialized");
-  }
-
-  async resumeThread(threadId) {
-    if (this.loadedThreads.has(threadId)) return;
-    await this.request("thread/resume", { threadId, includeTurns: false });
-    this.loadedThreads.add(threadId);
   }
 
   async startTurn(threadId, text) {
     await this.ensureReady();
-    await this.resumeThread(threadId);
-    return this.request("turn/start", {
-      threadId,
-      input: [{ type: "text", text, text_elements: [] }]
+    return this.request("thread-follower-start-turn", {
+      conversationId: threadId,
+      turnStartParams: {
+        input: [{ type: "text", text, text_elements: [] }],
+        attachments: []
+      }
     });
   }
 }
 
-function getCodexClient() {
-  if (!codexClient) codexClient = new CodexAppServerClient();
-  return codexClient;
+function getCodexIpcClient() {
+  if (!codexIpcClient) codexIpcClient = new DesktopCodexIpcClient();
+  return codexIpcClient;
 }
 
 function sqlString(value) {
@@ -406,13 +447,28 @@ async function sendToCodex(text, threadId) {
     err.status = 400;
     throw err;
   }
+  if (!(await findThread(targetThreadId))) {
+    const err = new Error("Thread not found");
+    err.status = 404;
+    throw err;
+  }
 
-  const result = await getCodexClient().startTurn(targetThreadId, trimmed);
+  let result;
+  try {
+    result = await getCodexIpcClient().startTurn(targetThreadId, trimmed);
+  } catch (error) {
+    if (error.message === "no-client-found" || error.message.includes("thread-role-timeout")) {
+      const err = new Error("Codex Desktop has no open owner for this thread. Open the target conversation in Codex Desktop, then send again.");
+      err.status = 409;
+      throw err;
+    }
+    throw error;
+  }
   return {
     ok: true,
-    mode: "app-server",
+    mode: "desktop-ipc",
     threadId: targetThreadId,
-    turnId: result?.turn?.id || null,
+    turnId: result?.result?.turn?.id || result?.result?.turnId || null,
     sentAt: new Date().toISOString()
   };
 }
@@ -447,7 +503,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   try {
     if (req.method === "GET" && url.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, codexHome: CODEX_HOME, now: new Date().toISOString() });
+      sendJson(res, 200, { ok: true, codexHome: CODEX_HOME, codexIpcSocket: CODEX_IPC_SOCKET, now: new Date().toISOString() });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/send") {

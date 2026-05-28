@@ -231,7 +231,7 @@ els.composerForm.addEventListener("submit", async (event) => {
   try {
     await postJson("/api/send", { message, threadId: state.selectedId });
     els.composerInput.value = "";
-    els.sendStatus.textContent = "已发送到 Codex app-server，等待对话同步";
+    els.sendStatus.textContent = "已发送到 Codex 桌面端，等待对话同步";
     setTimeout(() => refresh(true), 1200);
   } catch (error) {
     els.sendStatus.textContent = `发送失败：${error.message}`;

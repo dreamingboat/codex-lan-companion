@@ -35,18 +35,18 @@ PORT=9000 HOST=0.0.0.0 CODEX_HOME="$HOME/.codex" npm start
 
 ## 实验输入功能
 
-页面底部有输入框，可以把文本发送到当前选中的 Codex 对话。第三版使用 Codex app-server 的 JSON-RPC 接口提交 `turn/start`，不会激活 Codex 窗口，也不会改写剪贴板。
+页面底部有输入框，可以把文本发送到当前选中的 Codex 对话。当前版本接入 Codex Desktop 自己的本机 IPC socket，使用桌面端内部的 `thread-follower-start-turn` 桥接请求，由桌面窗口里的 owner 会话代发消息。
 
-默认 Codex 二进制路径：
+默认 IPC socket：
 
 ```text
-/Applications/Codex.app/Contents/Resources/codex
+$TMPDIR/codex-ipc/ipc-$UID.sock
 ```
 
 可以用环境变量覆盖：
 
 ```bash
-CODEX_BIN="/path/to/codex" npm start
+CODEX_IPC_SOCKET="/path/to/ipc.sock" npm start
 ```
 
-发送后，网页继续通过本地 JSONL 文件轮询显示真实对话内容。
+这个方式不会激活 Codex 窗口，也不会改写剪贴板。发送后，Codex Desktop 主界面和网页都会通过同一个桌面会话流更新；网页仍继续通过本地 JSONL 文件轮询显示真实对话内容。
