@@ -32,7 +32,11 @@ const els = {
   accountName: document.querySelector("#accountName"),
   accountPlan: document.querySelector("#accountPlan"),
   accountToggle: document.querySelector("#accountToggle"),
-  accountPanel: document.querySelector("#accountPanel")
+  accountPanel: document.querySelector("#accountPanel"),
+  authGate: document.querySelector("#authGate"),
+  authForm: document.querySelector("#authForm"),
+  authInput: document.querySelector("#authInput"),
+  authError: document.querySelector("#authError")
 };
 
 function initAuthToken() {
@@ -48,6 +52,17 @@ function initAuthToken() {
 
 function authHeaders(extra = {}) {
   return state.authToken ? { ...extra, "x-access-token": state.authToken } : extra;
+}
+
+function showAuthGate(message = "") {
+  els.authGate.hidden = false;
+  els.authError.textContent = message;
+  window.setTimeout(() => els.authInput.focus(), 0);
+}
+
+function hideAuthGate() {
+  els.authGate.hidden = true;
+  els.authError.textContent = "";
 }
 
 function formatDate(ms) {
@@ -316,7 +331,11 @@ async function loadAccount() {
 async function fetchJson(url) {
   const response = await fetch(url, { cache: "no-store", headers: authHeaders() });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || response.statusText);
+  if (!response.ok) {
+    const error = new Error(data.error || response.statusText);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -327,7 +346,11 @@ async function postJson(url, body) {
     body: JSON.stringify(body)
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || response.statusText);
+  if (!response.ok) {
+    const error = new Error(data.error || response.statusText);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -342,6 +365,7 @@ function renderComposerMode() {
 
 async function loadConfig() {
   state.config = await fetchJson("/api/health");
+  hideAuthGate();
   renderComposerMode();
 }
 
@@ -382,9 +406,15 @@ async function refresh(forceMessages = false) {
     await loadThreads();
     await loadMessages(forceMessages);
   } catch (error) {
+    if (error.status === 401) {
+      localStorage.removeItem("codexLanToken");
+      state.authToken = "";
+      state.config = null;
+      showAuthGate("访问码不正确，请重新输入。");
+      return;
+    }
     els.threadCount.textContent = "同步失败";
-    const authHint = error.message === "Unauthorized" ? "访问令牌无效或缺失。请使用启动终端里带 token 的地址打开。" : error.message;
-    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(authHint)}</div>`;
+    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   }
 }
 
@@ -426,6 +456,31 @@ els.accountToggle.addEventListener("click", () => {
   if (state.accountExpanded) loadAccount();
 });
 
+els.authForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const token = els.authInput.value.trim();
+  if (!token) {
+    showAuthGate("请输入访问码。");
+    return;
+  }
+  state.authToken = token;
+  localStorage.setItem("codexLanToken", token);
+  els.authError.textContent = "";
+  try {
+    await loadConfig();
+    await refresh(true);
+    await loadAccount();
+  } catch (error) {
+    if (error.status === 401) {
+      localStorage.removeItem("codexLanToken");
+      state.authToken = "";
+      showAuthGate("访问码不正确，请重新输入。");
+      return;
+    }
+    showAuthGate(error.message);
+  }
+});
+
 els.composerInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
@@ -459,6 +514,12 @@ initAuthToken();
 renderSidebarState();
 refresh(true);
 loadAccount();
-setInterval(() => loadThreads(), 3000);
-setInterval(() => loadMessages(false), 1000);
-setInterval(() => loadAccount(), 30000);
+setInterval(() => {
+  if (state.config) loadThreads().catch(() => {});
+}, 3000);
+setInterval(() => {
+  if (state.config) loadMessages(false).catch(() => {});
+}, 1000);
+setInterval(() => {
+  if (state.config) loadAccount().catch(() => {});
+}, 30000);

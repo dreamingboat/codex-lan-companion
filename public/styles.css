@@ -33,6 +33,74 @@ input {
   font: inherit;
 }
 
+.auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(246, 245, 242, 0.92);
+  padding: 18px;
+}
+
+.auth-card {
+  display: grid;
+  width: min(100%, 340px);
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 22px;
+}
+
+.auth-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+}
+
+.auth-card h2 {
+  white-space: normal;
+}
+
+.auth-card p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.auth-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  outline: none;
+  padding: 10px 12px;
+}
+
+.auth-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.auth-button {
+  border: 1px solid #145b50;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 650;
+  padding: 10px 14px;
+}
+
+.auth-error {
+  min-height: 16px;
+  color: #b42318;
+  font-size: 12px;
+}
+
 .shell {
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);

@@ -22,6 +22,7 @@ function parseCliArgs(argv) {
     else if (flag === "--host") options.host = nextValue();
     else if (flag === "--port") options.port = nextValue();
     else if (flag === "--token") options.token = nextValue();
+    else if (flag === "--password") options.password = nextValue();
     else if (flag === "--codex-home") options.codexHome = nextValue();
     else if (flag === "--ipc-socket") options.ipcSocket = nextValue();
     else if (flag === "--write") options.write = true;
@@ -45,7 +46,8 @@ Usage:
 Options:
   --host <host>          Bind host. Default: 0.0.0.0
   --port <port>          Bind port. Default: 8787
-  --token <token>        Access token. Default: generated per launch
+  --password <password>  Friendly access code. Default: generated per launch
+  --token <token>        Alias for --password
   --write                Enable sending messages to Codex Desktop
   --readonly             Force read-only mode. Default
   --no-auth              Disable access token guard
@@ -56,7 +58,7 @@ Options:
 Examples:
   codex-lan-companion
   codex-lan-companion --write
-  codex-lan-companion --port 8790 --token home-only
+  codex-lan-companion --port 8790 --password home-only
 `);
 }
 
@@ -70,7 +72,7 @@ const CODEX_HOME = cli.codexHome || process.env.CODEX_HOME || path.join(os.homed
 const HOST = cli.host || process.env.HOST || "0.0.0.0";
 const PORT = Number(cli.port || process.env.PORT || 8787);
 const AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
-const ACCESS_TOKEN = cli.token || process.env.CODEX_LAN_TOKEN || randomBytes(18).toString("base64url");
+const ACCESS_TOKEN = cli.password || cli.token || process.env.CODEX_LAN_PASSWORD || process.env.CODEX_LAN_TOKEN || randomBytes(4).toString("hex");
 const ALLOW_WRITE = cli.readonly ? false : Boolean(cli.write || process.env.CODEX_LAN_ALLOW_WRITE === "1" || process.env.CODEX_ALLOW_WRITE === "1");
 const CODEX_IPC_SOCKET =
   cli.ipcSocket ||
@@ -804,17 +806,17 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  const tokenQuery = AUTH_REQUIRED ? `?token=${encodeURIComponent(ACCESS_TOKEN)}` : "";
-  const localUrl = `http://127.0.0.1:${PORT}/${tokenQuery}`;
+  const localUrl = `http://127.0.0.1:${PORT}/`;
   const lanUrls = Object.values(os.networkInterfaces())
     .flat()
     .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
-    .map((entry) => `http://${entry.address}:${PORT}/${tokenQuery}`);
+    .map((entry) => `http://${entry.address}:${PORT}/`);
   const primaryUrl = lanUrls[0] || localUrl;
 
   console.log("Codex LAN Companion is running");
   console.log(`Local:  ${localUrl}`);
   for (const lanUrl of lanUrls) console.log(`LAN:    ${lanUrl}`);
+  if (AUTH_REQUIRED) console.log(`Access code: ${ACCESS_TOKEN}`);
   console.log(`Mode:   ${ALLOW_WRITE ? "write enabled" : "read-only"}${AUTH_REQUIRED ? " · token protected" : " · auth disabled"}`);
   console.log(`Data:   ${CODEX_HOME}`);
   console.log("");

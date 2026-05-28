@@ -11,6 +11,7 @@ This is an unofficial tool. It reads local Codex Desktop state and uses local Co
 - Live-ish sync, including an active "thinking" indicator
 - Account and local plan-usage summary when available from Codex local state
 - Token-protected API by default
+- Friendly access-code prompt in the browser
 - Read-only by default
 - Optional `--write` mode for sending messages back to Codex Desktop
 - Terminal QR code for quick phone access
@@ -49,12 +50,13 @@ The terminal prints local and LAN URLs like:
 
 ```text
 Codex LAN Companion is running
-Local:  http://127.0.0.1:8787/?token=...
-LAN:    http://10.0.0.131:8787/?token=...
+Local:  http://127.0.0.1:8787/
+LAN:    http://10.0.0.131:8787/
+Access code: 7f3a91c2
 Mode:   read-only · token protected
 ```
 
-Open the LAN URL from a phone or tablet on the same Wi-Fi. The page stores the token in browser local storage and removes it from the address bar.
+Open the LAN URL from a phone or tablet on the same Wi-Fi. The browser asks for the access code once, stores it locally, and uses it for later API requests.
 
 Enable web-to-Codex input:
 
@@ -65,7 +67,7 @@ codex-lan-companion --write
 Choose a port or fixed token:
 
 ```bash
-codex-lan-companion --port 8790 --token home-only
+codex-lan-companion --port 8790 --password home-only
 ```
 
 Disable auth only on a trusted local network:
@@ -79,7 +81,8 @@ codex-lan-companion --no-auth
 ```text
 --host <host>          Bind host. Default: 0.0.0.0
 --port <port>          Bind port. Default: 8787
---token <token>        Access token. Default: generated per launch
+--password <password>  Friendly access code. Default: generated per launch
+--token <token>        Alias for --password
 --write                Enable sending messages to Codex Desktop
 --readonly             Force read-only mode. Default
 --no-auth              Disable access token guard
@@ -91,7 +94,7 @@ codex-lan-companion --no-auth
 Environment variables are also supported:
 
 ```bash
-PORT=8790 HOST=0.0.0.0 CODEX_LAN_TOKEN=home-only CODEX_LAN_ALLOW_WRITE=1 codex-lan-companion
+PORT=8790 HOST=0.0.0.0 CODEX_LAN_PASSWORD=home-only CODEX_LAN_ALLOW_WRITE=1 codex-lan-companion
 ```
 
 ## Requirements
@@ -122,7 +125,7 @@ Recommended defaults:
 - Keep token auth enabled.
 - Keep read-only mode unless you need phone input.
 - Do not expose the port to the public internet.
-- Use a fixed token only if you can keep it private.
+- Use a fixed access code only if you can keep it private.
 
 ## Stability Notes
 

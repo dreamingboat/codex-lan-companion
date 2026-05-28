@@ -7,6 +7,16 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div id="authGate" class="auth-gate" hidden>
+      <form id="authForm" class="auth-card">
+        <img class="auth-mark" src="/assets/companion-mark.svg" alt="" />
+        <h2>Codex LAN Companion</h2>
+        <p>输入启动终端里显示的访问码。</p>
+        <input id="authInput" class="auth-input" type="password" placeholder="访问码" autocomplete="current-password" />
+        <button class="auth-button" type="submit">进入</button>
+        <div id="authError" class="auth-error" aria-live="polite"></div>
+      </form>
+    </div>
     <main class="shell" id="shell">
       <button id="sidebarToggle" class="drawer-tab" title="显示对话列表" aria-label="显示对话列表">☰</button>
       <aside class="sidebar">
