@@ -44,6 +44,178 @@ const els = {
   authError: document.querySelector("#authError")
 };
 
+const I18N = {
+  zh: {
+    documentTitle: "Codex LAN Viewer",
+    authTitle: "Codex LAN Companion",
+    authHelp: "输入启动终端里显示的访问码。",
+    accessCode: "访问码",
+    showAccessCode: "显示访问码",
+    hideAccessCode: "隐藏访问码",
+    rememberDevice: "记住这台设备",
+    enter: "进入",
+    verifying: "验证中",
+    showThreads: "显示对话列表",
+    closeThreads: "关闭对话列表",
+    hideThreads: "隐藏对话列表",
+    refresh: "刷新",
+    loading: "加载中",
+    searchThreads: "搜索对话",
+    threadList: "对话列表",
+    selectThread: "选择一个对话",
+    syncEvery: "每 3 秒自动同步",
+    pickThread: "从左侧选择一个 Codex 对话。",
+    tool: "工具",
+    roleTool: "工具",
+    showUsage: "显示套餐用量",
+    send: "发送",
+    sendToCodex: "发送到当前 Codex 窗口",
+    readonlyPlaceholder: "只读模式：启动时加 --write 才能发送",
+    readonly: "只读模式",
+    needAccessCode: "需要访问码",
+    enterAccessCode: "请输入访问码。",
+    accessCodeWrong: "访问码不正确，请重新输入。",
+    lockedAgain: "已锁定，请重新输入访问码。",
+    locked: "已锁定",
+    unlocked: "当前已解锁，点击锁定",
+    syncFailed: "同步失败",
+    syncTemporaryFailed: "同步暂时失败",
+    emptyThread: "这个对话暂时没有可展示内容。",
+    contents: "{count} 条内容",
+    thinking: "思考中...",
+    processing: "正在处理",
+    sent: "已发送",
+    processed: "已处理",
+    primaryUsage: "主要用量",
+    longTermUsage: "长期用量",
+    credit: "额度",
+    unlimitedCredit: "额度无限",
+    balance: "余额 {balance}",
+    noExtraCredit: "无额外额度",
+    updated: "更新 {time}",
+    latestLocalRecord: "本地最近记录",
+    noUsage: "还没有读取到本地套餐用量记录。",
+    conversationsCount: "{count} 个对话",
+    window: "窗口",
+    weekWindow: "{count} 周窗口",
+    dayWindow: "{count} 天窗口",
+    hourWindow: "{count} 小时窗口",
+    minuteWindow: "{count} 分钟窗口",
+    resetAt: "重置 {time}",
+    sendFailed: "发送失败：{message}",
+    untitled: "Untitled",
+    separator: " · "
+  },
+  en: {
+    documentTitle: "Codex LAN Viewer",
+    authTitle: "Codex LAN Companion",
+    authHelp: "Enter the access code shown in the terminal.",
+    accessCode: "Access code",
+    showAccessCode: "Show access code",
+    hideAccessCode: "Hide access code",
+    rememberDevice: "Remember this device",
+    enter: "Enter",
+    verifying: "Verifying",
+    showThreads: "Show conversations",
+    closeThreads: "Close conversations",
+    hideThreads: "Hide conversations",
+    refresh: "Refresh",
+    loading: "Loading",
+    searchThreads: "Search conversations",
+    threadList: "Conversation list",
+    selectThread: "Select a conversation",
+    syncEvery: "Auto-syncs every 3 seconds",
+    pickThread: "Select a Codex conversation from the left.",
+    tool: "Tools",
+    roleTool: "Tool",
+    showUsage: "Show plan usage",
+    send: "Send",
+    sendToCodex: "Send to current Codex window",
+    readonlyPlaceholder: "Read-only: restart with --write to send",
+    readonly: "Read-only",
+    needAccessCode: "Access code required",
+    enterAccessCode: "Enter the access code.",
+    accessCodeWrong: "Incorrect access code. Try again.",
+    lockedAgain: "Locked. Enter the access code again.",
+    locked: "Locked",
+    unlocked: "Unlocked. Click to lock",
+    syncFailed: "Sync failed",
+    syncTemporaryFailed: "Sync temporarily failed",
+    emptyThread: "This conversation has no displayable content yet.",
+    contents: "{count} items",
+    thinking: "Thinking...",
+    processing: "Processing",
+    sent: "Sent",
+    processed: "Processed",
+    primaryUsage: "Primary usage",
+    longTermUsage: "Long-term usage",
+    credit: "Credit",
+    unlimitedCredit: "Unlimited",
+    balance: "Balance {balance}",
+    noExtraCredit: "No extra credit",
+    updated: "Updated {time}",
+    latestLocalRecord: "Latest local record",
+    noUsage: "No local plan usage record found yet.",
+    conversationsCount: "{count} conversations",
+    window: "Window",
+    weekWindow: "{count} week window",
+    dayWindow: "{count} day window",
+    hourWindow: "{count} hour window",
+    minuteWindow: "{count} minute window",
+    resetAt: "resets {time}",
+    sendFailed: "Send failed: {message}",
+    untitled: "Untitled",
+    separator: " · "
+  }
+};
+
+function detectLocale() {
+  return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+state.locale = detectLocale();
+const dateFormatter = new Intl.DateTimeFormat(state.locale === "zh" ? "zh-CN" : "en-US", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit"
+});
+
+function t(key, values = {}) {
+  const text = I18N[state.locale][key] || I18N.en[key] || key;
+  return text.replace(/\{(\w+)\}/g, (_match, name) => values[name] ?? "");
+}
+
+function applyStaticText() {
+  document.documentElement.lang = state.locale === "zh" ? "zh-CN" : "en";
+  document.title = t("documentTitle");
+  document.querySelector(".auth-card h2").textContent = t("authTitle");
+  document.querySelector(".auth-card p").textContent = t("authHelp");
+  els.authInput.placeholder = t("accessCode");
+  els.authReveal.setAttribute("title", t("showAccessCode"));
+  els.authReveal.setAttribute("aria-label", t("showAccessCode"));
+  document.querySelector(".remember-toggle span").textContent = t("rememberDevice");
+  els.authButton.textContent = t("enter");
+  els.sidebarToggle.setAttribute("title", t("showThreads"));
+  els.sidebarToggle.setAttribute("aria-label", t("showThreads"));
+  els.drawerOverlay.setAttribute("title", t("closeThreads"));
+  els.drawerOverlay.setAttribute("aria-label", t("closeThreads"));
+  els.threadCount.textContent = t("loading");
+  els.refreshButton.setAttribute("title", t("refresh"));
+  els.sidebarCloseButton.setAttribute("title", t("hideThreads"));
+  els.sidebarCloseButton.setAttribute("aria-label", t("hideThreads"));
+  els.searchInput.placeholder = t("searchThreads");
+  els.threadList.setAttribute("aria-label", t("threadList"));
+  els.threadTitle.textContent = t("selectThread");
+  els.threadMeta.textContent = t("syncEvery");
+  document.querySelector(".toggle span").textContent = t("tool");
+  els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("pickThread"))}</div>`;
+  els.accountToggle.setAttribute("title", t("showUsage"));
+  els.accountToggle.setAttribute("aria-label", t("showUsage"));
+  els.sendButton.textContent = t("send");
+  els.composerInput.placeholder = t("sendToCodex");
+}
+
 function safeStorageGet(storage, key) {
   try {
     return storage.getItem(key) || "";
@@ -99,8 +271,8 @@ function hideAuthGate() {
 
 function renderLockState(unlocked) {
   els.lockButton.textContent = unlocked ? "🔓" : "🔒";
-  els.lockButton.setAttribute("aria-label", unlocked ? "当前已解锁，点击锁定" : "已锁定");
-  els.lockButton.setAttribute("title", unlocked ? "当前已解锁，点击锁定" : "已锁定");
+  els.lockButton.setAttribute("aria-label", unlocked ? t("unlocked") : t("locked"));
+  els.lockButton.setAttribute("title", unlocked ? t("unlocked") : t("locked"));
 }
 
 function lockApp(message = "") {
@@ -111,8 +283,8 @@ function lockApp(message = "") {
   state.messagesSignature = "";
   els.rememberDevice.checked = false;
   els.authInput.value = "";
-  els.threadCount.textContent = "需要访问码";
-  els.messageList.innerHTML = `<div class="empty-state">请输入访问码后继续。</div>`;
+  els.threadCount.textContent = t("needAccessCode");
+  els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("enterAccessCode"))}</div>`;
   showAuthGate(message);
 }
 
@@ -120,24 +292,14 @@ function formatDate(ms) {
   if (!ms) return "";
   const date = new Date(Number(ms));
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
+  return dateFormatter.format(date);
 }
 
 function formatMessageDate(value) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
+  return dateFormatter.format(date);
 }
 
 function formatDuration(ms) {
@@ -154,21 +316,16 @@ function formatResetTime(ms) {
   if (!ms) return "";
   const date = new Date(Number(ms));
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
+  return dateFormatter.format(date);
 }
 
 function formatWindow(minutes) {
   const value = Number(minutes);
-  if (!Number.isFinite(value) || value <= 0) return "窗口";
-  if (value % 10080 === 0) return `${value / 10080} 周窗口`;
-  if (value % 1440 === 0) return `${value / 1440} 天窗口`;
-  if (value % 60 === 0) return `${value / 60} 小时窗口`;
-  return `${value} 分钟窗口`;
+  if (!Number.isFinite(value) || value <= 0) return t("window");
+  if (value % 10080 === 0) return t("weekWindow", { count: value / 10080 });
+  if (value % 1440 === 0) return t("dayWindow", { count: value / 1440 });
+  if (value % 60 === 0) return t("hourWindow", { count: value / 60 });
+  return t("minuteWindow", { count: value });
 }
 
 function escapeHtml(text) {
@@ -202,11 +359,11 @@ function visibleThreads() {
 
 function renderThreads() {
   const threads = visibleThreads();
-  els.threadCount.textContent = `${state.threads.length} 个对话`;
+  els.threadCount.textContent = t("conversationsCount", { count: state.threads.length });
   els.threadList.innerHTML = threads
     .map((thread) => {
       const active = thread.id === state.selectedId ? " active" : "";
-      const title = escapeHtml(thread.title || "Untitled");
+      const title = escapeHtml(thread.title || t("untitled"));
       return `
         <button class="thread-item${active}" data-id="${thread.id}">
           <span class="thread-title">${title}</span>
@@ -239,7 +396,7 @@ function initResponsiveSidebar() {
 function roleLabel(message) {
   if (message.role === "assistant") return "Codex";
   if (message.role === "user") return "User";
-  if (message.role === "tool") return "Tool";
+  if (message.role === "tool") return t("roleTool");
   return message.role || "System";
 }
 
@@ -275,7 +432,7 @@ function roleBadge(message) {
 }
 
 function messageMetaTop(message, previousUserMessage) {
-  if (message.role === "user") return "已发送";
+  if (message.role === "user") return t("sent");
   if (message.role === "assistant") {
     const inferredDuration =
       message.durationMs ||
@@ -283,20 +440,20 @@ function messageMetaTop(message, previousUserMessage) {
         ? new Date(message.timestamp).getTime() - new Date(previousUserMessage.timestamp).getTime()
         : 0);
     const duration = formatDuration(inferredDuration);
-    return duration ? `已处理 ${duration}` : "已处理";
+    return duration ? `${t("processed")} ${duration}` : t("processed");
   }
-  if (message.role === "tool") return message.kind || "工具";
+  if (message.role === "tool") return message.kind || t("tool");
   return message.kind || "";
 }
 
 function renderMessages(data) {
   const selected = state.threads.find((thread) => thread.id === state.selectedId);
-  els.threadTitle.textContent = selected?.title || data.thread?.title || "Untitled";
-  const statusText = data.status?.thinking ? " · 思考中..." : "";
-  els.threadMeta.textContent = `${data.messages.length} 条内容${statusText}`;
+  els.threadTitle.textContent = selected?.title || data.thread?.title || t("untitled");
+  const statusText = data.status?.thinking ? `${t("separator")}${t("thinking")}` : "";
+  els.threadMeta.textContent = `${t("contents", { count: data.messages.length })}${statusText}`;
 
   if (!data.messages.length && !data.status?.thinking) {
-    els.messageList.innerHTML = `<div class="empty-state">这个对话暂时没有可展示内容。</div>`;
+    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("emptyThread"))}</div>`;
     return;
   }
 
@@ -305,7 +462,7 @@ function renderMessages(data) {
     .map((message) => {
       const isTool = message.role === "tool";
       const hidden = isTool && !state.showTools ? " hidden" : "";
-      const title = isTool ? `<div class="tool-title">${escapeHtml(message.kind)} · ${escapeHtml(message.title || "")}</div>` : "";
+      const title = isTool ? `<div class="tool-title">${escapeHtml(message.kind)}${t("separator")}${escapeHtml(message.title || "")}</div>` : "";
       const metaTop = messageMetaTop(message, previousUserMessage);
       const metaBottom = formatMessageDate(message.completedAtMs || message.timestamp);
       if (message.role === "user") previousUserMessage = message;
@@ -327,8 +484,8 @@ function renderMessages(data) {
       <article class="message assistant thinking-message">
         <div class="role">${roleBadge({ role: "assistant" })}</div>
         <div class="bubble thinking-bubble">
-          <div class="message-meta message-meta-top">正在处理</div>
-          <p>思考中<span class="thinking-dots" aria-hidden="true"></span></p>
+          <div class="message-meta message-meta-top">${escapeHtml(t("processing"))}</div>
+          <p>${escapeHtml(t("thinking").replace("...", ""))}<span class="thinking-dots" aria-hidden="true"></span></p>
         </div>
       </article>
     `
@@ -344,7 +501,7 @@ function usageLine(label, window) {
     <div class="usage-row">
       <span>${escapeHtml(label)}</span>
       <strong>${escapeHtml(used)}</strong>
-      <small>${escapeHtml(formatWindow(window.windowMinutes))}${reset ? ` · 重置 ${escapeHtml(reset)}` : ""}</small>
+      <small>${escapeHtml(formatWindow(window.windowMinutes))}${reset ? `${t("separator")}${escapeHtml(t("resetAt", { time: reset }))}` : ""}</small>
     </div>
   `;
 }
@@ -364,24 +521,24 @@ function renderAccount() {
   const usage = account?.usage;
   const credits = usage?.credits;
   const creditText = credits?.unlimited
-    ? "额度无限"
+    ? t("unlimitedCredit")
     : credits?.hasCredits
-      ? `余额 ${credits.balance ?? "-"}`
-      : "无额外额度";
+      ? t("balance", { balance: credits.balance ?? "-" })
+      : t("noExtraCredit");
   const updatedAt = formatResetTime(usage?.updatedAt);
   els.accountPanel.innerHTML = usage
     ? `
       <div class="usage-grid">
-        ${usageLine("主要用量", usage.primary)}
-        ${usageLine("长期用量", usage.secondary)}
+        ${usageLine(t("primaryUsage"), usage.primary)}
+        ${usageLine(t("longTermUsage"), usage.secondary)}
         <div class="usage-row">
-          <span>额度</span>
+          <span>${escapeHtml(t("credit"))}</span>
           <strong>${escapeHtml(creditText)}</strong>
-          <small>${updatedAt ? `更新 ${escapeHtml(updatedAt)}` : "本地最近记录"}</small>
+          <small>${updatedAt ? escapeHtml(t("updated", { time: updatedAt })) : escapeHtml(t("latestLocalRecord"))}</small>
         </div>
       </div>
     `
-    : `<div class="usage-empty">还没有读取到本地套餐用量记录。</div>`;
+    : `<div class="usage-empty">${escapeHtml(t("noUsage"))}</div>`;
 }
 
 async function loadAccount() {
@@ -424,9 +581,9 @@ function renderComposerMode() {
   const allowWrite = Boolean(state.config?.allowWrite);
   els.composerInput.disabled = !allowWrite;
   els.sendButton.disabled = !allowWrite;
-  els.composerInput.placeholder = allowWrite ? "发送到当前 Codex 窗口" : "只读模式：启动时加 --write 才能发送";
-  if (!allowWrite) els.sendStatus.textContent = "只读模式";
-  else if (els.sendStatus.textContent === "只读模式") els.sendStatus.textContent = "";
+  els.composerInput.placeholder = allowWrite ? t("sendToCodex") : t("readonlyPlaceholder");
+  if (!allowWrite) els.sendStatus.textContent = t("readonly");
+  else if (els.sendStatus.textContent === t("readonly")) els.sendStatus.textContent = "";
 }
 
 async function loadConfig() {
@@ -446,9 +603,9 @@ async function loadThreads() {
 
 function renderTransientSyncError(error) {
   const selected = state.threads.find((thread) => thread.id === state.selectedId);
-  const title = selected?.title || els.threadTitle.textContent || "选择一个对话";
+  const title = selected?.title || els.threadTitle.textContent || t("selectThread");
   els.threadTitle.textContent = title;
-  els.threadMeta.textContent = `同步暂时失败 · ${error.message}`;
+  els.threadMeta.textContent = `${t("syncTemporaryFailed")}${t("separator")}${error.message}`;
 }
 
 async function loadMessages(force = false) {
@@ -485,10 +642,10 @@ async function refresh(forceMessages = false) {
     await loadMessages(forceMessages);
   } catch (error) {
     if (error.status === 401) {
-      lockApp(state.authToken ? "访问码不正确，请重新输入。" : "请输入访问码。");
+      lockApp(state.authToken ? t("accessCodeWrong") : t("enterAccessCode"));
       return;
     }
-    els.threadCount.textContent = "同步失败";
+    els.threadCount.textContent = t("syncFailed");
     if (state.threads.length || state.messagesSignature) {
       renderTransientSyncError(error);
     } else {
@@ -547,7 +704,7 @@ els.toolToggle.addEventListener("change", (event) => {
 });
 
 els.lockButton.addEventListener("click", () => {
-  lockApp("已锁定，请重新输入访问码。");
+  lockApp(t("lockedAgain"));
 });
 
 els.accountToggle.addEventListener("click", () => {
@@ -560,8 +717,8 @@ els.authReveal.addEventListener("click", () => {
   const revealed = els.authInput.type === "text";
   els.authInput.type = revealed ? "password" : "text";
   els.authReveal.setAttribute("aria-pressed", String(!revealed));
-  els.authReveal.setAttribute("aria-label", revealed ? "显示访问码" : "隐藏访问码");
-  els.authReveal.setAttribute("title", revealed ? "显示访问码" : "隐藏访问码");
+  els.authReveal.setAttribute("aria-label", revealed ? t("showAccessCode") : t("hideAccessCode"));
+  els.authReveal.setAttribute("title", revealed ? t("showAccessCode") : t("hideAccessCode"));
   els.authInput.focus();
 });
 
@@ -569,7 +726,7 @@ els.authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const token = els.authInput.value.trim();
   if (!token) {
-    showAuthGate("请输入访问码。");
+    showAuthGate(t("enterAccessCode"));
     return;
   }
   state.authToken = token;
@@ -578,20 +735,20 @@ els.authForm.addEventListener("submit", async (event) => {
   else safeStorageRemove(localStorage, "codexLanToken");
   els.authError.textContent = "";
   els.authButton.disabled = true;
-  els.authButton.textContent = "验证中";
+  els.authButton.textContent = t("verifying");
   try {
     await loadConfig();
     await refresh(true);
     await loadAccount();
   } catch (error) {
     if (error.status === 401) {
-      lockApp("访问码不正确，请重新输入。");
+      lockApp(t("accessCodeWrong"));
       return;
     }
     showAuthGate(error.message);
   } finally {
     els.authButton.disabled = false;
-    els.authButton.textContent = "进入";
+    els.authButton.textContent = t("enter");
   }
 });
 
@@ -615,7 +772,7 @@ els.composerForm.addEventListener("submit", async (event) => {
     els.composerInput.value = "";
     setTimeout(() => refresh(true), 1200);
   } catch (error) {
-    els.sendStatus.textContent = `发送失败：${error.message}`;
+    els.sendStatus.textContent = t("sendFailed", { message: error.message });
   } finally {
     els.sendButton.disabled = false;
     els.composerInput.disabled = false;
@@ -624,6 +781,7 @@ els.composerForm.addEventListener("submit", async (event) => {
   }
 });
 
+applyStaticText();
 initAuthToken();
 initResponsiveSidebar();
 refresh(true);
