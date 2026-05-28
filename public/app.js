@@ -37,6 +37,7 @@ const els = {
   authForm: document.querySelector("#authForm"),
   authInput: document.querySelector("#authInput"),
   authButton: document.querySelector("#authButton"),
+  authReveal: document.querySelector("#authReveal"),
   authError: document.querySelector("#authError")
 };
 
@@ -455,6 +456,15 @@ els.accountToggle.addEventListener("click", () => {
   state.accountExpanded = !state.accountExpanded;
   renderAccount();
   if (state.accountExpanded) loadAccount();
+});
+
+els.authReveal.addEventListener("click", () => {
+  const revealed = els.authInput.type === "text";
+  els.authInput.type = revealed ? "password" : "text";
+  els.authReveal.setAttribute("aria-pressed", String(!revealed));
+  els.authReveal.setAttribute("aria-label", revealed ? "显示访问码" : "隐藏访问码");
+  els.authReveal.setAttribute("title", revealed ? "显示访问码" : "隐藏访问码");
+  els.authInput.focus();
 });
 
 els.authForm.addEventListener("submit", async (event) => {

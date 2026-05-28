@@ -12,7 +12,15 @@
         <img class="auth-mark" src="/assets/companion-mark.svg" alt="" />
         <h2>Codex LAN Companion</h2>
         <p>输入启动终端里显示的访问码。</p>
-        <input id="authInput" class="auth-input" type="password" placeholder="访问码" autocomplete="current-password" />
+        <div class="auth-input-wrap">
+          <input id="authInput" class="auth-input" type="password" placeholder="访问码" autocomplete="current-password" />
+          <button id="authReveal" class="auth-reveal" type="button" title="显示访问码" aria-label="显示访问码" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M2.75 12s3.25-6 9.25-6 9.25 6 9.25 6-3.25 6-9.25 6-9.25-6-9.25-6z"></path>
+              <circle cx="12" cy="12" r="2.75"></circle>
+            </svg>
+          </button>
+        </div>
         <button id="authButton" class="auth-button" type="submit">进入</button>
         <div id="authError" class="auth-error" aria-live="polite"></div>
       </form>

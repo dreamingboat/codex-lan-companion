@@ -74,6 +74,10 @@ input {
   line-height: 1.45;
 }
 
+.auth-input-wrap {
+  position: relative;
+}
+
 .auth-input {
   width: 100%;
   border: 1px solid var(--border);
@@ -81,12 +85,44 @@ input {
   background: var(--panel);
   color: var(--text);
   outline: none;
-  padding: 10px 12px;
+  padding: 10px 44px 10px 12px;
 }
 
 .auth-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.auth-reveal {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.auth-reveal:hover,
+.auth-reveal[aria-pressed="true"] {
+  background: var(--panel-soft);
+  color: var(--text);
+}
+
+.auth-reveal svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
 }
 
 .auth-button {
