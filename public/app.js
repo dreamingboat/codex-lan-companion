@@ -229,9 +229,9 @@ els.composerForm.addEventListener("submit", async (event) => {
   els.composerInput.disabled = true;
   els.sendStatus.textContent = "正在发送到 Codex...";
   try {
-    await postJson("/api/send", { message });
+    await postJson("/api/send", { message, threadId: state.selectedId });
     els.composerInput.value = "";
-    els.sendStatus.textContent = "已发送，等待 Codex 写入对话";
+    els.sendStatus.textContent = "已发送到 Codex app-server，等待对话同步";
     setTimeout(() => refresh(true), 1200);
   } catch (error) {
     els.sendStatus.textContent = `发送失败：${error.message}`;

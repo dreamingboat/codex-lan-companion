@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createReadStream, existsSync, promises as fs } from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -10,7 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8787);
-const CODEX_APP_NAME = process.env.CODEX_APP_NAME || "Codex";
+const CODEX_BIN = process.env.CODEX_BIN || "/Applications/Codex.app/Contents/Resources/codex";
 const STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const SESSION_INDEX = path.join(CODEX_HOME, "session_index.jsonl");
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -21,6 +21,7 @@ const jsonHeaders = {
 };
 
 const messageCache = new Map();
+let codexClient = null;
 
 function sendJson(res, status, body) {
   res.writeHead(status, jsonHeaders);
@@ -48,21 +49,6 @@ function runSqlJson(sql) {
   });
 }
 
-function runCommand(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = execFile(command, args, { maxBuffer: 2 * 1024 * 1024, ...options }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(stderr || error.message));
-        return;
-      }
-      resolve({ stdout, stderr });
-    });
-    if (options.input !== undefined) {
-      child.stdin.end(options.input);
-    }
-  });
-}
-
 async function readJsonBody(req, limit = 128 * 1024) {
   let body = "";
   for await (const chunk of req) {
@@ -80,6 +66,115 @@ async function readJsonBody(req, limit = 128 * 1024) {
     err.status = 400;
     throw err;
   }
+}
+
+class CodexAppServerClient {
+  constructor() {
+    this.child = null;
+    this.rl = null;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.ready = null;
+    this.loadedThreads = new Set();
+  }
+
+  async ensureReady() {
+    if (this.child && !this.child.killed && this.ready) {
+      return this.ready;
+    }
+    this.start();
+    this.ready = this.initialize();
+    return this.ready;
+  }
+
+  start() {
+    this.child = spawn(CODEX_BIN, ["app-server", "--listen", "stdio://"], {
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    this.loadedThreads.clear();
+    this.pending.clear();
+
+    this.rl = readline.createInterface({ input: this.child.stdout });
+    this.rl.on("line", (line) => this.handleLine(line));
+    this.child.stderr.on("data", () => {
+      // Codex app-server emits plugin startup warnings on stderr; they are not actionable here.
+    });
+    this.child.on("exit", () => {
+      for (const { reject } of this.pending.values()) {
+        reject(new Error("Codex app-server exited"));
+      }
+      this.pending.clear();
+      this.loadedThreads.clear();
+      this.ready = null;
+      this.child = null;
+      this.rl = null;
+    });
+  }
+
+  handleLine(line) {
+    if (!line.trim()) return;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (!message.id) return;
+    const pending = this.pending.get(message.id);
+    if (!pending) return;
+    this.pending.delete(message.id);
+    if (message.error) {
+      pending.reject(new Error(message.error.message || "Codex app-server request failed"));
+    } else {
+      pending.resolve(message.result);
+    }
+  }
+
+  request(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      if (!this.child?.stdin?.writable) {
+        reject(new Error("Codex app-server is not running"));
+        return;
+      }
+      const id = this.nextId++;
+      this.pending.set(id, { resolve, reject });
+      this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    });
+  }
+
+  notify(method, params = {}) {
+    if (this.child?.stdin?.writable) {
+      this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
+    }
+  }
+
+  async initialize() {
+    await this.request("initialize", {
+      clientInfo: { name: "WebControlUI", version: "0.3.0" },
+      capabilities: { experimental: true }
+    });
+    this.notify("initialized");
+  }
+
+  async resumeThread(threadId) {
+    if (this.loadedThreads.has(threadId)) return;
+    await this.request("thread/resume", { threadId, includeTurns: false });
+    this.loadedThreads.add(threadId);
+  }
+
+  async startTurn(threadId, text) {
+    await this.ensureReady();
+    await this.resumeThread(threadId);
+    return this.request("turn/start", {
+      threadId,
+      input: [{ type: "text", text, text_elements: [] }]
+    });
+  }
+}
+
+function getCodexClient() {
+  if (!codexClient) codexClient = new CodexAppServerClient();
+  return codexClient;
 }
 
 function sqlString(value) {
@@ -293,7 +388,7 @@ async function getMessages(id) {
   return { thread, ...parsed };
 }
 
-async function sendToCodex(text) {
+async function sendToCodex(text, threadId) {
   const trimmed = String(text || "").trim();
   if (!trimmed) {
     const err = new Error("Message is empty");
@@ -305,27 +400,21 @@ async function sendToCodex(text) {
     err.status = 400;
     throw err;
   }
+  const targetThreadId = threadId || (await getThreads())[0]?.id;
+  if (!targetThreadId) {
+    const err = new Error("No target thread selected");
+    err.status = 400;
+    throw err;
+  }
 
-  await runCommand("pbcopy", [], { input: trimmed });
-  const script = `
-    on run argv
-      set appName to item 1 of argv
-      tell application appName to activate
-      delay 0.35
-      tell application "System Events"
-        if not (exists process appName) then error "Codex process not found"
-        tell process appName
-          set frontmost to true
-          delay 0.15
-          keystroke "v" using command down
-          delay 0.12
-          key code 36
-        end tell
-      end tell
-    end run
-  `;
-  await runCommand("osascript", ["-e", script, CODEX_APP_NAME]);
-  return { ok: true, target: CODEX_APP_NAME, sentAt: new Date().toISOString() };
+  const result = await getCodexClient().startTurn(targetThreadId, trimmed);
+  return {
+    ok: true,
+    mode: "app-server",
+    threadId: targetThreadId,
+    turnId: result?.turn?.id || null,
+    sentAt: new Date().toISOString()
+  };
 }
 
 async function serveStatic(res, pathname) {
@@ -363,7 +452,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/send") {
       const body = await readJsonBody(req);
-      sendJson(res, 200, await sendToCodex(body.message));
+      sendJson(res, 200, await sendToCodex(body.message, body.threadId));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/threads") {

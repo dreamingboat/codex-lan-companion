@@ -35,10 +35,18 @@ PORT=9000 HOST=0.0.0.0 CODEX_HOME="$HOME/.codex" npm start
 
 ## 实验输入功能
 
-页面底部有输入框，可以把文本发送到当前打开的 Codex 桌面窗口。实现方式是 macOS 剪贴板粘贴并回车，因此需要：
+页面底部有输入框，可以把文本发送到当前选中的 Codex 对话。第三版使用 Codex app-server 的 JSON-RPC 接口提交 `turn/start`，不会激活 Codex 窗口，也不会改写剪贴板。
 
-- Codex 桌面应用正在运行
-- 当前 Codex 窗口停留在你希望继续对话的线程
-- macOS 允许当前运行环境通过 System Events 控制应用
+默认 Codex 二进制路径：
 
-如果发送失败，通常是系统没有授予辅助功能权限，或 Codex 当前窗口没有可输入的对话框焦点。
+```text
+/Applications/Codex.app/Contents/Resources/codex
+```
+
+可以用环境变量覆盖：
+
+```bash
+CODEX_BIN="/path/to/codex" npm start
+```
+
+发送后，网页继续通过本地 JSONL 文件轮询显示真实对话内容。
