@@ -138,11 +138,26 @@ function renderSidebarState() {
   els.sidebarToggle.setAttribute("aria-expanded", String(!state.sidebarCollapsed));
 }
 
-function roleLabel(message) {
-  if (message.role === "user") return "User";
-  if (message.role === "assistant") return "Codex";
-  if (message.role === "tool") return "Tool";
-  return message.role || "System";
+function roleIcon(message) {
+  if (message.role === "assistant") {
+    return `<img class="role-icon-image" src="/assets/codex-app-icon.png" alt="Codex" />`;
+  }
+  if (message.role === "user") {
+    return `
+      <svg class="role-icon-svg" viewBox="0 0 24 24" aria-label="User" role="img">
+        <rect x="7" y="2.75" width="10" height="18.5" rx="2.25"></rect>
+        <path d="M10.25 5.25h3.5M11 18.25h2"></path>
+      </svg>
+    `;
+  }
+  if (message.role === "tool") {
+    return `
+      <svg class="role-icon-svg" viewBox="0 0 24 24" aria-label="Tool" role="img">
+        <path d="M14.5 5.5 18.5 9.5M16.5 3.5l4 4-11 11H5.5v-4z"></path>
+      </svg>
+    `;
+  }
+  return `<span class="role-icon-fallback">${escapeHtml(message.role || "System")}</span>`;
 }
 
 function messageMetaTop(message, previousUserMessage) {
@@ -182,7 +197,7 @@ function renderMessages(data) {
       if (message.role === "user") previousUserMessage = message;
       return `
         <article class="message ${escapeHtml(message.role)}${hidden}">
-          <div class="role">${roleLabel(message)}</div>
+          <div class="role">${roleIcon(message)}</div>
           <div class="bubble">
             ${metaTop ? `<div class="message-meta message-meta-top">${escapeHtml(metaTop)}</div>` : ""}
             ${title}
@@ -196,7 +211,7 @@ function renderMessages(data) {
   const thinkingHtml = data.status?.thinking
     ? `
       <article class="message assistant thinking-message">
-        <div class="role">Codex</div>
+        <div class="role">${roleIcon({ role: "assistant" })}</div>
         <div class="bubble thinking-bubble">
           <div class="message-meta message-meta-top">正在处理</div>
           <p>思考中<span class="thinking-dots" aria-hidden="true"></span></p>
