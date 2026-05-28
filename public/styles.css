@@ -287,6 +287,12 @@ h2 {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.sidebar-account {
+  display: grid;
+  gap: 8px;
+  margin: 0 16px 12px;
+}
+
 .thread-list {
   flex: 1;
   min-height: 0;
@@ -592,6 +598,7 @@ h2 {
 
 .account-widget {
   display: inline-flex;
+  width: 100%;
   flex: 0 1 auto;
   min-width: 0;
   align-items: center;
@@ -600,9 +607,10 @@ h2 {
 
 .account-summary {
   display: inline-flex;
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: min(38vw, 360px);
   align-items: center;
+  justify-content: space-between;
   gap: 7px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -662,7 +670,7 @@ h2 {
 
 .usage-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 
@@ -752,6 +760,10 @@ h2 {
     padding: 9px 10px;
   }
 
+  .sidebar-account {
+    margin: 0 12px 8px;
+  }
+
   .thread-list {
     padding: 2px 6px 10px;
   }
@@ -824,7 +836,6 @@ h2 {
   }
 
   .account-summary {
-    max-width: 44vw;
     padding: 6px 7px;
   }
 

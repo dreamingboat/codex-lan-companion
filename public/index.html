@@ -43,6 +43,25 @@
           </div>
         </div>
         <input id="searchInput" class="search" type="search" placeholder="搜索对话" autocomplete="off" />
+        <div class="sidebar-account">
+          <div class="account-widget">
+            <div id="accountSummary" class="account-summary" aria-live="polite">
+              <span id="accountName" class="account-name">Codex</span>
+              <span id="accountPlan" class="account-plan">-</span>
+            </div>
+            <button
+              id="accountToggle"
+              class="account-toggle"
+              type="button"
+              title="显示套餐用量"
+              aria-label="显示套餐用量"
+              aria-expanded="false"
+            >
+              ⌃
+            </button>
+          </div>
+          <div id="accountPanel" class="account-panel" hidden></div>
+        </div>
         <div id="threadList" class="thread-list" aria-label="对话列表"></div>
       </aside>
 
@@ -72,26 +91,9 @@
           <div class="composer-actions">
             <div class="composer-left">
               <span id="sendStatus" class="send-status" aria-live="polite"></span>
-              <div class="account-widget">
-                <div id="accountSummary" class="account-summary" aria-live="polite">
-                  <span id="accountName" class="account-name">Codex</span>
-                  <span id="accountPlan" class="account-plan">-</span>
-                </div>
-                <button
-                  id="accountToggle"
-                  class="account-toggle"
-                  type="button"
-                  title="显示套餐用量"
-                  aria-label="显示套餐用量"
-                  aria-expanded="false"
-                >
-                  ⌃
-                </button>
-              </div>
             </div>
             <button id="sendButton" class="send-button" type="submit">发送</button>
           </div>
-          <div id="accountPanel" class="account-panel" hidden></div>
         </form>
       </section>
     </main>
