@@ -47,9 +47,28 @@
             autocomplete="off"
           ></textarea>
           <div class="composer-actions">
-            <span id="sendStatus" class="send-status" aria-live="polite"></span>
+            <div class="composer-left">
+              <span id="sendStatus" class="send-status" aria-live="polite"></span>
+              <div class="account-widget">
+                <div id="accountSummary" class="account-summary" aria-live="polite">
+                  <span id="accountName" class="account-name">Codex</span>
+                  <span id="accountPlan" class="account-plan">-</span>
+                </div>
+                <button
+                  id="accountToggle"
+                  class="account-toggle"
+                  type="button"
+                  title="显示套餐用量"
+                  aria-label="显示套餐用量"
+                  aria-expanded="false"
+                >
+                  ⌃
+                </button>
+              </div>
+            </div>
             <button id="sendButton" class="send-button" type="submit">发送</button>
           </div>
+          <div id="accountPanel" class="account-panel" hidden></div>
         </form>
       </section>
     </main>

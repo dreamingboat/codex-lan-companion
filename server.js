@@ -19,6 +19,7 @@ const CODEX_IPC_SOCKET =
     : path.join(os.tmpdir(), "codex-ipc", typeof process.getuid === "function" ? `ipc-${process.getuid()}.sock` : "ipc.sock"));
 const STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const SESSION_INDEX = path.join(CODEX_HOME, "session_index.jsonl");
+const AUTH_FILE = path.join(CODEX_HOME, "auth.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const IPC_VERSION_BY_METHOD = {
   "thread-follower-start-turn": 1
@@ -31,6 +32,7 @@ const jsonHeaders = {
 
 const messageCache = new Map();
 let codexIpcClient = null;
+let accountCache = null;
 
 function sendJson(res, status, body) {
   res.writeHead(status, jsonHeaders);
@@ -220,6 +222,141 @@ function getCodexIpcClient() {
 
 function sqlString(value) {
   return String(value).replaceAll("'", "''");
+}
+
+function decodeJwtPayload(token) {
+  if (!token || typeof token !== "string") return null;
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function displayPlanName(plan) {
+  const normalized = String(plan || "").trim().toLowerCase();
+  if (!normalized) return "";
+  const names = {
+    free: "Free",
+    plus: "Plus",
+    pro: "Pro",
+    team: "Team",
+    enterprise: "Enterprise"
+  };
+  return names[normalized] || normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+async function readAuthProfile() {
+  if (!existsSync(AUTH_FILE)) return {};
+  const raw = await fs.readFile(AUTH_FILE, "utf8");
+  const auth = JSON.parse(raw);
+  const idClaims = decodeJwtPayload(auth.tokens?.id_token) || {};
+  const accessClaims = decodeJwtPayload(auth.tokens?.access_token) || {};
+  const planClaim =
+    idClaims["https://api.openai.com/auth.chatgpt_plan_type"] ||
+    accessClaims["https://api.openai.com/auth.chatgpt_plan_type"];
+  return {
+    name: idClaims.name || accessClaims.name || "",
+    email: idClaims.email || accessClaims.email || "",
+    authMode: auth.auth_mode || "",
+    tokenPlan: planClaim || ""
+  };
+}
+
+function normalizeRateLimitWindow(limit) {
+  if (!limit || typeof limit !== "object") return null;
+  const resetsAtSeconds = Number(limit.resets_at);
+  const usedPercent = Number(limit.used_percent);
+  const windowMinutes = Number(limit.window_minutes);
+  return {
+    usedPercent: Number.isFinite(usedPercent) ? usedPercent : null,
+    windowMinutes: Number.isFinite(windowMinutes) ? windowMinutes : null,
+    resetsAtMs: Number.isFinite(resetsAtSeconds) ? resetsAtSeconds * 1000 : null
+  };
+}
+
+function normalizeRateLimits(rateLimits, updatedAt) {
+  if (!rateLimits || typeof rateLimits !== "object") return null;
+  return {
+    planType: rateLimits.plan_type || "",
+    primary: normalizeRateLimitWindow(rateLimits.primary),
+    secondary: normalizeRateLimitWindow(rateLimits.secondary),
+    credits:
+      rateLimits.credits && typeof rateLimits.credits === "object"
+        ? {
+            hasCredits: Boolean(rateLimits.credits.has_credits),
+            unlimited: Boolean(rateLimits.credits.unlimited),
+            balance: Number.isFinite(Number(rateLimits.credits.balance)) ? Number(rateLimits.credits.balance) : null
+          }
+        : null,
+    updatedAt: updatedAt || null
+  };
+}
+
+async function latestRolloutPaths(limit = 8) {
+  if (!existsSync(STATE_DB)) return [];
+  const rows = await runSqlJson(`
+    SELECT rollout_path AS rolloutPath
+    FROM threads
+    WHERE rollout_path IS NOT NULL
+    ORDER BY updated_at_ms DESC, updated_at DESC
+    LIMIT ${Number(limit) || 8};
+  `);
+  return rows
+    .map((row) => {
+      try {
+        return resolveRolloutPath(row.rolloutPath);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+async function readLatestRateLimits() {
+  const rolloutPaths = await latestRolloutPaths();
+  for (const rolloutPath of rolloutPaths) {
+    if (!existsSync(rolloutPath)) continue;
+    const content = await fs.readFile(rolloutPath, "utf8");
+    const lines = content.split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index]?.trim();
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line);
+        const rateLimits = entry.type === "event_msg" && entry.payload?.type === "token_count" ? entry.payload.rate_limits : null;
+        if (rateLimits) return normalizeRateLimits(rateLimits, entry.timestamp);
+      } catch {
+        // Skip malformed historical lines.
+      }
+    }
+  }
+  return null;
+}
+
+async function getAccountInfo() {
+  const now = Date.now();
+  if (accountCache && now - accountCache.cachedAt < 15000) return accountCache.value;
+
+  const profile = await readAuthProfile();
+  const usage = await readLatestRateLimits();
+  const plan = usage?.planType || profile.tokenPlan || profile.authMode || "";
+  const value = {
+    user: {
+      name: profile.name,
+      email: profile.email,
+      label: profile.name || profile.email || "Codex"
+    },
+    plan: {
+      type: String(plan || "").toLowerCase(),
+      label: displayPlanName(plan)
+    },
+    usage
+  };
+  accountCache = { cachedAt: now, value };
+  return value;
 }
 
 async function getThreads() {
@@ -538,6 +675,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/send") {
       const body = await readJsonBody(req);
       sendJson(res, 200, await sendToCodex(body.message, body.threadId));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/account") {
+      sendJson(res, 200, await getAccountInfo());
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/threads") {

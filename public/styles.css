@@ -367,14 +367,132 @@ h2 {
   gap: 12px;
 }
 
-.send-status {
+.composer-left {
+  display: flex;
   flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.send-status {
+  flex: 1 1 120px;
   min-width: 0;
   overflow: hidden;
   color: #b42318;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.account-widget {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.account-summary {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(38vw, 360px);
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f7f6f2;
+  color: var(--text);
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.account-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+}
+
+.account-plan {
+  flex: 0 0 auto;
+  border-left: 1px solid var(--border);
+  color: var(--muted);
+  padding-left: 7px;
+}
+
+.account-toggle {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  transition: transform 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.account-toggle:hover,
+.account-toggle.expanded {
+  border-color: #c7c1b8;
+  color: var(--text);
+}
+
+.account-toggle.expanded {
+  transform: rotate(180deg);
+}
+
+.account-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f7f6f2;
+  padding: 9px 10px;
+}
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.usage-row {
+  min-width: 0;
+  border-left: 2px solid #c8d8d4;
+  padding-left: 9px;
+}
+
+.usage-row span,
+.usage-row small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-row strong {
+  display: block;
+  margin: 1px 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-empty {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .send-button {
@@ -479,6 +597,29 @@ h2 {
 
   .composer-actions {
     gap: 8px;
+  }
+
+  .composer-left {
+    gap: 6px;
+  }
+
+  .send-status {
+    flex-basis: 0;
+  }
+
+  .account-summary {
+    max-width: 44vw;
+    padding: 6px 7px;
+  }
+
+  .account-toggle {
+    width: 28px;
+    height: 28px;
+  }
+
+  .usage-grid {
+    grid-template-columns: 1fr;
+    gap: 7px;
   }
 
   .send-button {

@@ -5,7 +5,9 @@ const state = {
   filter: "",
   showTools: false,
   sidebarCollapsed: false,
-  loadingMessages: false
+  loadingMessages: false,
+  account: null,
+  accountExpanded: false
 };
 
 const els = {
@@ -23,7 +25,12 @@ const els = {
   composerForm: document.querySelector("#composerForm"),
   composerInput: document.querySelector("#composerInput"),
   sendButton: document.querySelector("#sendButton"),
-  sendStatus: document.querySelector("#sendStatus")
+  sendStatus: document.querySelector("#sendStatus"),
+  accountSummary: document.querySelector("#accountSummary"),
+  accountName: document.querySelector("#accountName"),
+  accountPlan: document.querySelector("#accountPlan"),
+  accountToggle: document.querySelector("#accountToggle"),
+  accountPanel: document.querySelector("#accountPanel")
 };
 
 function formatDate(ms) {
@@ -58,6 +65,27 @@ function formatDuration(ms) {
   if (minutes <= 0) return `${seconds}s`;
   if (seconds === 0) return `${minutes}m`;
   return `${minutes}m${seconds}s`;
+}
+
+function formatResetTime(ms) {
+  if (!ms) return "";
+  const date = new Date(Number(ms));
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function formatWindow(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value <= 0) return "窗口";
+  if (value % 10080 === 0) return `${value / 10080} 周窗口`;
+  if (value % 1440 === 0) return `${value / 1440} 天窗口`;
+  if (value % 60 === 0) return `${value / 60} 小时窗口`;
+  return `${value} 分钟窗口`;
 }
 
 function escapeHtml(text) {
@@ -166,6 +194,64 @@ function renderMessages(data) {
     .join("");
 }
 
+function usageLine(label, window) {
+  if (!window) return "";
+  const used = Number.isFinite(Number(window.usedPercent)) ? `${Math.round(Number(window.usedPercent))}%` : "-";
+  const reset = formatResetTime(window.resetsAtMs);
+  return `
+    <div class="usage-row">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(used)}</strong>
+      <small>${escapeHtml(formatWindow(window.windowMinutes))}${reset ? ` · 重置 ${escapeHtml(reset)}` : ""}</small>
+    </div>
+  `;
+}
+
+function renderAccount() {
+  const account = state.account;
+  const label = account?.user?.label || "Codex";
+  const plan = account?.plan?.label || "-";
+  els.accountName.textContent = label;
+  els.accountPlan.textContent = plan;
+  els.accountSummary.title = account?.user?.email || label;
+  els.accountToggle.setAttribute("aria-expanded", String(state.accountExpanded));
+  els.accountToggle.classList.toggle("expanded", state.accountExpanded);
+  els.accountPanel.hidden = !state.accountExpanded;
+
+  if (!state.accountExpanded) return;
+  const usage = account?.usage;
+  const credits = usage?.credits;
+  const creditText = credits?.unlimited
+    ? "额度无限"
+    : credits?.hasCredits
+      ? `余额 ${credits.balance ?? "-"}`
+      : "无额外额度";
+  const updatedAt = formatResetTime(usage?.updatedAt);
+  els.accountPanel.innerHTML = usage
+    ? `
+      <div class="usage-grid">
+        ${usageLine("主要用量", usage.primary)}
+        ${usageLine("长期用量", usage.secondary)}
+        <div class="usage-row">
+          <span>额度</span>
+          <strong>${escapeHtml(creditText)}</strong>
+          <small>${updatedAt ? `更新 ${escapeHtml(updatedAt)}` : "本地最近记录"}</small>
+        </div>
+      </div>
+    `
+    : `<div class="usage-empty">还没有读取到本地套餐用量记录。</div>`;
+}
+
+async function loadAccount() {
+  try {
+    state.account = await fetchJson("/api/account");
+    renderAccount();
+  } catch {
+    state.account = null;
+    renderAccount();
+  }
+}
+
 async function fetchJson(url) {
   const response = await fetch(url, { cache: "no-store" });
   const data = await response.json();
@@ -257,6 +343,12 @@ els.toolToggle.addEventListener("change", (event) => {
   loadMessages(true);
 });
 
+els.accountToggle.addEventListener("click", () => {
+  state.accountExpanded = !state.accountExpanded;
+  renderAccount();
+  if (state.accountExpanded) loadAccount();
+});
+
 els.composerInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
@@ -286,4 +378,6 @@ els.composerForm.addEventListener("submit", async (event) => {
 
 renderSidebarState();
 refresh(true);
+loadAccount();
 setInterval(() => refresh(false), 3000);
+setInterval(() => loadAccount(), 30000);
