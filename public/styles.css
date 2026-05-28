@@ -577,11 +577,12 @@ h2 {
   flex: 1 1 auto;
   min-width: 0;
   align-items: center;
+  justify-content: flex-start;
   gap: 10px;
 }
 
 .send-status {
-  flex: 1 1 120px;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: #b42318;
