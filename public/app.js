@@ -36,6 +36,7 @@ const els = {
   authGate: document.querySelector("#authGate"),
   authForm: document.querySelector("#authForm"),
   authInput: document.querySelector("#authInput"),
+  authButton: document.querySelector("#authButton"),
   authError: document.querySelector("#authError")
 };
 
@@ -464,8 +465,14 @@ els.authForm.addEventListener("submit", async (event) => {
     return;
   }
   state.authToken = token;
-  localStorage.setItem("codexLanToken", token);
+  try {
+    localStorage.setItem("codexLanToken", token);
+  } catch {
+    // Some mobile privacy modes may block storage; the in-memory token still works for this tab.
+  }
   els.authError.textContent = "";
+  els.authButton.disabled = true;
+  els.authButton.textContent = "验证中";
   try {
     await loadConfig();
     await refresh(true);
@@ -478,6 +485,9 @@ els.authForm.addEventListener("submit", async (event) => {
       return;
     }
     showAuthGate(error.message);
+  } finally {
+    els.authButton.disabled = false;
+    els.authButton.textContent = "进入";
   }
 });
 
