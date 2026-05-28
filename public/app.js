@@ -21,6 +21,7 @@ const els = {
   messageList: document.querySelector("#messageList"),
   refreshButton: document.querySelector("#refreshButton"),
   sidebarToggle: document.querySelector("#sidebarToggle"),
+  drawerOverlay: document.querySelector("#drawerOverlay"),
   sidebarCloseButton: document.querySelector("#sidebarCloseButton"),
   searchInput: document.querySelector("#searchInput"),
   toolToggle: document.querySelector("#toolToggle"),
@@ -210,6 +211,21 @@ function renderThreads() {
 function renderSidebarState() {
   els.shell.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
   els.sidebarToggle.setAttribute("aria-expanded", String(!state.sidebarCollapsed));
+}
+
+function isCompactPortrait() {
+  return window.matchMedia("(max-width: 760px) and (orientation: portrait)").matches;
+}
+
+function closeSidebarOnCompact() {
+  if (!isCompactPortrait()) return;
+  state.sidebarCollapsed = true;
+  renderSidebarState();
+}
+
+function initResponsiveSidebar() {
+  state.sidebarCollapsed = false;
+  renderSidebarState();
 }
 
 function roleLabel(message) {
@@ -480,6 +496,7 @@ els.threadList.addEventListener("click", (event) => {
   state.messagesSignature = "";
   renderThreads();
   loadMessages(true);
+  closeSidebarOnCompact();
 });
 
 els.refreshButton.addEventListener("click", () => refresh(true));
@@ -492,6 +509,22 @@ els.sidebarCloseButton.addEventListener("click", () => {
 els.sidebarToggle.addEventListener("click", () => {
   state.sidebarCollapsed = false;
   renderSidebarState();
+});
+
+els.drawerOverlay.addEventListener("click", () => {
+  state.sidebarCollapsed = true;
+  renderSidebarState();
+});
+
+els.messageList.addEventListener("pointerdown", () => {
+  closeSidebarOnCompact();
+});
+
+window.addEventListener("resize", () => {
+  if (!isCompactPortrait()) {
+    state.sidebarCollapsed = false;
+    renderSidebarState();
+  }
 });
 
 els.searchInput.addEventListener("input", (event) => {
@@ -584,7 +617,7 @@ els.composerForm.addEventListener("submit", async (event) => {
 });
 
 initAuthToken();
-renderSidebarState();
+initResponsiveSidebar();
 refresh(true);
 loadAccount();
 setInterval(() => {

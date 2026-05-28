@@ -166,11 +166,11 @@ input {
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
-  transition: grid-template-columns 180ms ease;
+  position: relative;
 }
 
 .shell.sidebar-collapsed {
-  grid-template-columns: 0 minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
 }
 
 .sidebar {
@@ -181,14 +181,12 @@ input {
   border-right: 1px solid var(--border);
   background: #ebe9e3;
   overflow: hidden;
-  transition: opacity 160ms ease, visibility 160ms ease;
+  transform: translateX(0);
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 240ms ease;
 }
 
 .shell.sidebar-collapsed .sidebar {
-  border-right: 0;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
+  transform: translateX(0);
 }
 
 .sidebar-top {
@@ -268,7 +266,11 @@ h2 {
 }
 
 .shell.sidebar-collapsed .drawer-tab {
-  display: grid;
+  display: none;
+}
+
+.drawer-overlay {
+  display: none;
 }
 
 .search {
@@ -718,25 +720,59 @@ h2 {
   opacity: 0.58;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 760px) and (orientation: portrait) {
   .shell {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(190px, 34dvh) minmax(0, 1fr);
     height: 100dvh;
   }
 
   .shell.sidebar-collapsed {
     grid-template-columns: 1fr;
-    grid-template-rows: 0 minmax(0, 1fr);
   }
 
   .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 30;
+    width: min(92vw, 420px);
     border-right: 0;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 0;
+    box-shadow: 16px 0 34px rgba(38, 35, 31, 0.18);
   }
 
   .shell.sidebar-collapsed .sidebar {
-    border-bottom: 0;
+    transform: translateX(calc(-100% - 18px));
+    pointer-events: none;
+  }
+
+  .drawer-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 25;
+    display: block;
+    border: 0;
+    background: rgba(34, 33, 31, 0.24);
+    opacity: 1;
+    cursor: pointer;
+    transition: opacity 220ms ease;
+  }
+
+  .shell.sidebar-collapsed .drawer-overlay {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .drawer-tab {
+    display: grid;
+  }
+
+  .shell.sidebar-collapsed .drawer-tab {
+    display: grid;
+  }
+
+  .shell:not(.sidebar-collapsed) .drawer-tab {
+    opacity: 0;
+    pointer-events: none;
   }
 
   .sidebar-top {
@@ -768,6 +804,7 @@ h2 {
     padding: 10px 14px;
   }
 
+  .conversation-header,
   .shell.sidebar-collapsed .conversation-header {
     padding-left: 58px;
   }
