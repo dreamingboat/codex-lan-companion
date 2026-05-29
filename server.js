@@ -90,6 +90,7 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const MAX_SEND_IMAGES = 4;
 const MAX_SEND_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_SEND_BODY_BYTES = 32 * 1024 * 1024;
+const SUPPORTED_SEND_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const IPC_VERSION_BY_METHOD = {
   "thread-follower-start-turn": 1,
   "thread-follower-interrupt-turn": 1
@@ -329,11 +330,7 @@ class DesktopCodexIpcClient {
     for (const image of images) {
       input.push({
         type: "image",
-        source: {
-          type: "base64",
-          media_type: image.mimeType,
-          data: image.data
-        }
+        url: `data:${image.mimeType};base64,${image.data}`
       });
     }
     return this.request("thread-follower-start-turn", {
@@ -777,8 +774,8 @@ function normalizeSendImages(images) {
     const mimeType = String(image?.mimeType || "").trim().toLowerCase();
     const data = String(image?.data || "").replace(/^data:[^;]+;base64,/, "");
     const name = String(image?.name || `image-${index + 1}`).slice(0, 120);
-    if (!mimeType.startsWith("image/")) {
-      const err = new Error("Only image attachments are supported");
+    if (!SUPPORTED_SEND_IMAGE_MIME_TYPES.has(mimeType)) {
+      const err = new Error("Unsupported image format. Use JPEG, PNG, WebP, or GIF.");
       err.status = 400;
       throw err;
     }
@@ -903,7 +900,7 @@ async function serveStatic(res, pathname) {
     };
     res.writeHead(200, {
       "content-type": types[ext] || "application/octet-stream",
-      "cache-control": "no-cache"
+      "cache-control": "no-store, must-revalidate"
     });
     res.end(data);
   } catch {

@@ -696,13 +696,16 @@ h2 {
 }
 
 .send-status {
-  flex: 1 1 auto;
-  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   color: #b42318;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.send-status:empty {
+  display: none;
 }
 
 .composer-buttons {
@@ -1025,10 +1028,6 @@ h2 {
 
   .attachment-item {
     width: min(100%, 190px);
-  }
-
-  .send-status {
-    flex-basis: 0;
   }
 
   .account-summary {

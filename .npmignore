@@ -1,5 +1,7 @@
 node_modules/
 npm-debug.log*
 .DS_Store
+
+# Local Codex Desktop bundles copied out for IPC inspection.
 app-session-*.js
 main-*.js

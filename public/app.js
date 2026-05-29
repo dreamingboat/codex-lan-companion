@@ -82,6 +82,7 @@ const I18N = {
     addImage: "添加图片",
     removeImage: "移除图片",
     imageTooLarge: "图片过大，单张不能超过 {size} MB。",
+    imageUnsupported: "不支持此图片格式，请换 JPEG、PNG 或 WebP。",
     tooManyImages: "最多只能添加 {count} 张图片。",
     sendToCodex: "发送到当前 Codex 窗口",
     readonlyPlaceholder: "只读模式：启动时加 --write 才能发送",
@@ -150,6 +151,7 @@ const I18N = {
     addImage: "Add image",
     removeImage: "Remove image",
     imageTooLarge: "Image is too large. Each image must be under {size} MB.",
+    imageUnsupported: "Unsupported image format. Use JPEG, PNG, or WebP.",
     tooManyImages: "You can attach up to {count} images.",
     sendToCodex: "Send to current Codex window",
     readonlyPlaceholder: "Read-only: restart with --write to send",
@@ -204,6 +206,8 @@ const dateFormatter = new Intl.DateTimeFormat(state.locale === "zh" ? "zh-CN" : 
 });
 const MAX_IMAGE_ATTACHMENTS = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_EDGE = 2000;
+const IMAGE_JPEG_QUALITY = 0.86;
 
 function t(key, values = {}) {
   const text = I18N[state.locale][key] || I18N.en[key] || key;
@@ -402,42 +406,72 @@ function mimeTypeForFile(file) {
   const name = String(file.name || "").toLowerCase();
   if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
   if (name.endsWith(".png")) return "image/png";
-  if (name.endsWith(".gif")) return "image/gif";
   if (name.endsWith(".webp")) return "image/webp";
   return "";
 }
 
-function fileToImageAttachment(file) {
+function loadImageFromFile(file) {
   return new Promise((resolve, reject) => {
-    const mimeType = mimeTypeForFile(file);
-    if (!mimeType.startsWith("image/")) {
-      resolve(null);
-      return;
-    }
-    if (file.size > MAX_IMAGE_BYTES) {
-      reject(new Error(t("imageTooLarge", { size: Math.round(MAX_IMAGE_BYTES / 1024 / 1024) })));
-      return;
-    }
-    const reader = new FileReader();
-    reader.addEventListener("load", () => {
-      const dataUrl = String(reader.result || "");
-      const match = dataUrl.match(/^data:([^;]*);base64,(.+)$/);
-      if (!match) {
-        reject(new Error("Invalid image data"));
-        return;
-      }
-      resolve({
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        name: file.name || "image",
-        mimeType: mimeType || match[1] || "image/png",
-        size: file.size,
-        dataUrl,
-        data: match[2]
-      });
-    });
-    reader.addEventListener("error", () => reject(reader.error || new Error("Could not read image")));
-    reader.readAsDataURL(file);
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(t("imageUnsupported")));
+    };
+    image.src = url;
   });
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Invalid image data"))), type, quality);
+  });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result || "")));
+    reader.addEventListener("error", () => reject(reader.error || new Error("Could not read image")));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function fileToImageAttachment(file) {
+  const mimeType = mimeTypeForFile(file);
+  if (!mimeType.startsWith("image/")) return null;
+
+  const image = await loadImageFromFile(file);
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(image.naturalWidth || 1, image.naturalHeight || 1));
+  const width = Math.max(1, Math.round((image.naturalWidth || 1) * scale));
+  const height = Math.max(1, Math.round((image.naturalHeight || 1) * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+
+  const blob = await canvasToBlob(canvas, "image/jpeg", IMAGE_JPEG_QUALITY);
+  if (blob.size > MAX_IMAGE_BYTES) {
+    throw new Error(t("imageTooLarge", { size: Math.round(MAX_IMAGE_BYTES / 1024 / 1024) }));
+  }
+  const dataUrl = await blobToDataUrl(blob);
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) throw new Error("Invalid image data");
+  return {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: (file.name || "image").replace(/\.[^.]*$/, "") + ".jpg",
+    mimeType: "image/jpeg",
+    size: blob.size,
+    dataUrl,
+    data: match[2]
+  };
 }
 
 function renderImageAttachments() {
@@ -1044,6 +1078,11 @@ els.composerForm.addEventListener("submit", async (event) => {
     }
   } catch (error) {
     if (pendingMessageId) removePendingMessage(pendingMessageId);
+    if (!thinking && /image/i.test(error.message || "")) {
+      state.imageAttachments = [];
+      els.imageInput.value = "";
+      renderImageAttachments();
+    }
     els.sendStatus.textContent = t(thinking ? "interruptFailed" : "sendFailed", { message: error.message });
   } finally {
     state.composerBusy = false;
