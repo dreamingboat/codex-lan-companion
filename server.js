@@ -611,6 +611,10 @@ function messageFromResponseItem(timestamp, payload) {
   return null;
 }
 
+function isTurnEndEvent(payload) {
+  return payload?.type === "task_complete" || payload?.type === "turn_aborted";
+}
+
 async function parseRollout(filePath) {
   const stat = await fs.stat(filePath);
   const signature = `${stat.size}:${stat.mtimeMs}`;
@@ -645,7 +649,7 @@ async function parseRollout(filePath) {
           };
           continue;
         }
-        if (entry.payload?.type === "task_complete") {
+        if (isTurnEndEvent(entry.payload)) {
           const turnId = entry.payload.turn_id || activeTurn?.turnId || null;
           const durationMs = Number(entry.payload.duration_ms);
           const completedAtMs = Number(entry.payload.completed_at) ? Number(entry.payload.completed_at) * 1000 : Date.parse(entry.timestamp);

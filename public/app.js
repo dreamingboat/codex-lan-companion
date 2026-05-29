@@ -679,6 +679,10 @@ function refreshSoon(delayMs = 700) {
   setTimeout(() => refresh(true), delayMs);
 }
 
+function shouldRefocusComposer() {
+  return window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+}
+
 els.threadList.addEventListener("click", (event) => {
   const button = event.target.closest(".thread-item");
   if (!button) return;
@@ -805,6 +809,9 @@ els.composerForm.addEventListener("submit", async (event) => {
   try {
     if (thinking) {
       await postJson("/api/interrupt", { threadId: state.selectedId });
+      state.threadStatus = { ...(state.threadStatus || {}), thinking: false };
+      state.messagesSignature = "";
+      renderComposerMode();
       refreshSoon();
     } else {
       await postJson("/api/send", { message, threadId: state.selectedId });
@@ -816,7 +823,7 @@ els.composerForm.addEventListener("submit", async (event) => {
   } finally {
     state.composerBusy = false;
     renderComposerMode();
-    els.composerInput.focus();
+    if (!thinking && shouldRefocusComposer()) els.composerInput.focus();
   }
 });
 
