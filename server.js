@@ -90,7 +90,11 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const MAX_SEND_IMAGES = 4;
 const MAX_SEND_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_SEND_BODY_BYTES = 32 * 1024 * 1024;
-const SUPPORTED_SEND_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const MIN_SEND_IMAGE_BYTES = 512;
+const MIN_SEND_IMAGE_EDGE = 16;
+const MAX_SEND_IMAGE_EDGE = 4096;
+const MAX_SEND_IMAGE_PIXELS = 12_000_000;
+const SUPPORTED_SEND_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const IPC_VERSION_BY_METHOD = {
   "thread-follower-start-turn": 1,
   "thread-follower-interrupt-turn": 1
@@ -775,23 +779,130 @@ function normalizeSendImages(images) {
     const data = String(image?.data || "").replace(/^data:[^;]+;base64,/, "");
     const name = String(image?.name || `image-${index + 1}`).slice(0, 120);
     if (!SUPPORTED_SEND_IMAGE_MIME_TYPES.has(mimeType)) {
-      const err = new Error("Unsupported image format. Use JPEG, PNG, WebP, or GIF.");
+      const err = new Error("Unsupported image format. Use JPEG, PNG, or WebP.");
       err.status = 400;
       throw err;
     }
-    if (!data || !/^[a-zA-Z0-9+/=]+$/.test(data)) {
+    if (!data || data.length % 4 !== 0 || !/^[a-zA-Z0-9+/]+={0,2}$/.test(data)) {
       const err = new Error("Invalid image data");
       err.status = 400;
       throw err;
     }
-    const byteLength = Buffer.byteLength(data, "base64");
-    if (byteLength > MAX_SEND_IMAGE_BYTES) {
+    const bytes = Buffer.from(data, "base64");
+    const validation = validateSendImageBytes(bytes, mimeType);
+    if (bytes.byteLength > MAX_SEND_IMAGE_BYTES) {
       const err = new Error(`Image is too large. Maximum is ${Math.round(MAX_SEND_IMAGE_BYTES / 1024 / 1024)} MB.`);
       err.status = 400;
       throw err;
     }
-    return { name, mimeType, data, size: byteLength };
+    return { name, mimeType, data, size: bytes.byteLength, width: validation.width, height: validation.height };
   });
+}
+
+function invalidImage(message = "Invalid image data") {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
+}
+
+function validateSendImageBytes(bytes, mimeType) {
+  if (!Buffer.isBuffer(bytes) || bytes.byteLength < MIN_SEND_IMAGE_BYTES) {
+    throw invalidImage("Invalid image: image data is too small.");
+  }
+  const dimensions =
+    mimeType === "image/jpeg"
+      ? jpegDimensions(bytes)
+      : mimeType === "image/png"
+        ? pngDimensions(bytes)
+        : mimeType === "image/webp"
+          ? webpDimensions(bytes)
+          : null;
+  if (!dimensions) {
+    throw invalidImage("Invalid image: file content does not match its image type.");
+  }
+  const { width, height } = dimensions;
+  const pixels = width * height;
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width < MIN_SEND_IMAGE_EDGE ||
+    height < MIN_SEND_IMAGE_EDGE ||
+    width > MAX_SEND_IMAGE_EDGE ||
+    height > MAX_SEND_IMAGE_EDGE ||
+    pixels > MAX_SEND_IMAGE_PIXELS
+  ) {
+    throw invalidImage(
+      `Invalid image: dimensions must be ${MIN_SEND_IMAGE_EDGE}-${MAX_SEND_IMAGE_EDGE}px per side and under ${Math.round(MAX_SEND_IMAGE_PIXELS / 1_000_000)}MP.`
+    );
+  }
+  return dimensions;
+}
+
+function pngDimensions(bytes) {
+  const signature = "89504e470d0a1a0a";
+  if (bytes.byteLength < 33 || bytes.subarray(0, 8).toString("hex") !== signature) return null;
+  if (bytes.subarray(12, 16).toString("ascii") !== "IHDR") return null;
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  return { width, height };
+}
+
+function jpegDimensions(bytes) {
+  if (bytes.byteLength < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset + 9 < bytes.byteLength) {
+    if (bytes[offset] !== 0xff) return null;
+    let marker = bytes[offset + 1];
+    while (marker === 0xff) {
+      offset += 1;
+      marker = bytes[offset + 1];
+    }
+    offset += 2;
+    if (marker === 0xd9 || marker === 0xda) break;
+    if (offset + 2 > bytes.byteLength) return null;
+    const segmentLength = bytes.readUInt16BE(offset);
+    if (segmentLength < 2 || offset + segmentLength > bytes.byteLength) return null;
+    if (
+      (marker >= 0xc0 && marker <= 0xc3) ||
+      (marker >= 0xc5 && marker <= 0xc7) ||
+      (marker >= 0xc9 && marker <= 0xcb) ||
+      (marker >= 0xcd && marker <= 0xcf)
+    ) {
+      if (segmentLength < 7) return null;
+      const height = bytes.readUInt16BE(offset + 3);
+      const width = bytes.readUInt16BE(offset + 5);
+      return { width, height };
+    }
+    offset += segmentLength;
+  }
+  return null;
+}
+
+function webpDimensions(bytes) {
+  if (bytes.byteLength < 30 || bytes.subarray(0, 4).toString("ascii") !== "RIFF" || bytes.subarray(8, 12).toString("ascii") !== "WEBP") {
+    return null;
+  }
+  const chunk = bytes.subarray(12, 16).toString("ascii");
+  if (chunk === "VP8X" && bytes.byteLength >= 30) {
+    return {
+      width: 1 + bytes.readUIntLE(24, 3),
+      height: 1 + bytes.readUIntLE(27, 3)
+    };
+  }
+  if (chunk === "VP8 " && bytes.byteLength >= 30 && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+    return {
+      width: bytes.readUInt16LE(26) & 0x3fff,
+      height: bytes.readUInt16LE(28) & 0x3fff
+    };
+  }
+  if (chunk === "VP8L" && bytes.byteLength >= 25 && bytes[20] === 0x2f) {
+    const bits = bytes.readUInt32LE(21);
+    return {
+      width: (bits & 0x3fff) + 1,
+      height: ((bits >> 14) & 0x3fff) + 1
+    };
+  }
+  return null;
 }
 
 async function sendToCodex(text, threadId, images = []) {

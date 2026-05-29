@@ -83,6 +83,7 @@ const I18N = {
     removeImage: "移除图片",
     imageTooLarge: "图片过大，单张不能超过 {size} MB。",
     imageUnsupported: "不支持此图片格式，请换 JPEG、PNG 或 WebP。",
+    imageDimensionsInvalid: "图片尺寸不支持，宽高需在 {min}-{max}px 之间。",
     tooManyImages: "最多只能添加 {count} 张图片。",
     sendToCodex: "发送到当前 Codex 窗口",
     readonlyPlaceholder: "只读模式：启动时加 --write 才能发送",
@@ -152,6 +153,7 @@ const I18N = {
     removeImage: "Remove image",
     imageTooLarge: "Image is too large. Each image must be under {size} MB.",
     imageUnsupported: "Unsupported image format. Use JPEG, PNG, or WebP.",
+    imageDimensionsInvalid: "Unsupported image dimensions. Width and height must be {min}-{max}px.",
     tooManyImages: "You can attach up to {count} images.",
     sendToCodex: "Send to current Codex window",
     readonlyPlaceholder: "Read-only: restart with --write to send",
@@ -207,6 +209,7 @@ const dateFormatter = new Intl.DateTimeFormat(state.locale === "zh" ? "zh-CN" : 
 const MAX_IMAGE_ATTACHMENTS = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 2000;
+const MIN_IMAGE_EDGE = 16;
 const IMAGE_JPEG_QUALITY = 0.86;
 
 function t(key, values = {}) {
@@ -446,6 +449,17 @@ async function fileToImageAttachment(file) {
   if (!mimeType.startsWith("image/")) return null;
 
   const image = await loadImageFromFile(file);
+  const naturalWidth = image.naturalWidth || 0;
+  const naturalHeight = image.naturalHeight || 0;
+  if (
+    naturalWidth < MIN_IMAGE_EDGE ||
+    naturalHeight < MIN_IMAGE_EDGE ||
+    naturalWidth > 12000 ||
+    naturalHeight > 12000 ||
+    naturalWidth * naturalHeight > 60_000_000
+  ) {
+    throw new Error(t("imageDimensionsInvalid", { min: MIN_IMAGE_EDGE, max: 12000 }));
+  }
   const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(image.naturalWidth || 1, image.naturalHeight || 1));
   const width = Math.max(1, Math.round((image.naturalWidth || 1) * scale));
   const height = Math.max(1, Math.round((image.naturalHeight || 1) * scale));
@@ -453,12 +467,13 @@ async function fileToImageAttachment(file) {
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d");
+  if (!context) throw new Error("Invalid image data");
   context.fillStyle = "#fff";
   context.fillRect(0, 0, width, height);
   context.drawImage(image, 0, 0, width, height);
 
   const blob = await canvasToBlob(canvas, "image/jpeg", IMAGE_JPEG_QUALITY);
-  if (blob.size > MAX_IMAGE_BYTES) {
+  if (blob.size < 512 || blob.size > MAX_IMAGE_BYTES) {
     throw new Error(t("imageTooLarge", { size: Math.round(MAX_IMAGE_BYTES / 1024 / 1024) }));
   }
   const dataUrl = await blobToDataUrl(blob);
