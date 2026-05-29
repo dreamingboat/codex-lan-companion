@@ -12,6 +12,7 @@
   --assistant: #ffffff;
   --tool: #f4efe6;
   --interaction: #fff4d8;
+  --notice: #fff0f0;
   --shadow: 0 10px 26px rgba(38, 35, 31, 0.08);
 }
 
@@ -548,6 +549,21 @@ h2 {
   color: #a27308;
 }
 
+.message.notice .bubble {
+  border-color: #e1aaa6;
+  background: var(--notice);
+  color: #4a211f;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), inset 3px 0 0 #c75b55;
+}
+
+.message.notice .message-meta {
+  color: #95524d;
+}
+
+.notice-icon {
+  color: #b13b35;
+}
+
 .message.tool.hidden {
   display: none;
 }
@@ -611,6 +627,13 @@ h2 {
 .interaction-title {
   margin-bottom: 8px;
   color: #5e470d;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.notice-title {
+  margin-bottom: 8px;
+  color: #7d2c28;
   font-size: 13px;
   font-weight: 750;
 }

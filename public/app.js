@@ -76,6 +76,7 @@ const I18N = {
     tool: "工具",
     roleTool: "工具",
     roleInteraction: "交互",
+    roleNotice: "提示",
     interactionRequired: "需要处理",
     interactionDesktopAction: "请在桌面 Codex 处理",
     showUsage: "显示套餐用量",
@@ -123,6 +124,7 @@ const I18N = {
     resetAt: "重置 {time}",
     sendFailed: "发送失败：{message}",
     interruptFailed: "停止失败：{message}",
+    busyCannotSend: "Codex 正在处理。请先停止当前任务，再发送这条消息。",
     untitled: "Untitled",
     separator: " · "
   },
@@ -149,6 +151,7 @@ const I18N = {
     tool: "Tools",
     roleTool: "Tool",
     roleInteraction: "Interaction",
+    roleNotice: "Notice",
     interactionRequired: "Action required",
     interactionDesktopAction: "Handle this in Codex desktop",
     showUsage: "Show plan usage",
@@ -196,6 +199,7 @@ const I18N = {
     resetAt: "resets {time}",
     sendFailed: "Send failed: {message}",
     interruptFailed: "Stop failed: {message}",
+    busyCannotSend: "Codex is still processing. Stop the current task before sending this message.",
     untitled: "Untitled",
     separator: " · "
   }
@@ -577,6 +581,7 @@ function roleLabel(message) {
   if (message.role === "user") return "User";
   if (message.role === "tool") return t("roleTool");
   if (message.role === "interaction") return t("roleInteraction");
+  if (message.role === "notice") return t("roleNotice");
   return message.role || "System";
 }
 
@@ -608,6 +613,15 @@ function roleIcon(message) {
       </svg>
     `;
   }
+  if (message.role === "notice") {
+    return `
+      <svg class="role-icon-svg notice-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"></circle>
+        <path d="M12 8h.01"></path>
+        <path d="M11 12h1v4h1"></path>
+      </svg>
+    `;
+  }
   return `<span class="role-icon-fallback">${escapeHtml(message.role || "System")}</span>`;
 }
 
@@ -633,6 +647,7 @@ function messageMetaTop(message, previousUserMessage) {
   }
   if (message.role === "tool") return message.kind || t("tool");
   if (message.role === "interaction") return message.requiresDesktopAction ? t("interactionRequired") : message.kind || t("roleInteraction");
+  if (message.role === "notice") return message.kind || t("roleNotice");
   return message.kind || "";
 }
 
@@ -732,11 +747,12 @@ function renderMessages(data) {
     .map((message) => {
       const isTool = message.role === "tool";
       const isInteraction = message.role === "interaction";
+      const isNotice = message.role === "notice";
       const hidden = isTool && !state.showTools ? " hidden" : "";
       const title =
-        isTool || isInteraction
-          ? `<div class="${isInteraction ? "interaction-title" : "tool-title"}">${escapeHtml(
-              isInteraction ? t("interactionDesktopAction") : message.kind
+        isTool || isInteraction || isNotice
+          ? `<div class="${isInteraction ? "interaction-title" : isNotice ? "notice-title" : "tool-title"}">${escapeHtml(
+              isInteraction ? t("interactionDesktopAction") : isNotice ? message.title || t("roleNotice") : message.kind
             )}${isTool ? `${t("separator")}${escapeHtml(message.title || "")}` : ""}</div>`
           : "";
       const metaTop = messageMetaTop(message, previousUserMessage);
@@ -1094,6 +1110,10 @@ els.composerForm.addEventListener("submit", async (event) => {
   const message = els.composerInput.value.trim();
   const images = [...state.imageAttachments];
   if (!thinking && !message && !images.length) return;
+  if (thinking && (message || images.length)) {
+    els.sendStatus.textContent = t("busyCannotSend");
+    return;
+  }
   const pendingMessageId = thinking ? null : addPendingUserMessage(state.selectedId, message, images);
   state.composerBusy = true;
   renderComposerMode();

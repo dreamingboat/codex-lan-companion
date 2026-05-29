@@ -106,6 +106,7 @@ const jsonHeaders = {
 };
 
 const messageCache = new Map();
+const recentNotices = [];
 let codexIpcClient = null;
 let accountCache = null;
 let sqliteQueue = Promise.resolve();
@@ -302,7 +303,11 @@ class DesktopCodexIpcClient {
     this.pending.delete(message.requestId);
     clearTimeout(pending.timer);
     if (message.resultType === "error") {
-      pending.reject(new Error(message.error || `${message.method || "IPC request"} failed`));
+      const error = new Error(message.error || `${message.method || pending.method || "IPC request"} failed`);
+      error.ipcMessage = message;
+      error.ipcMethod = pending.method;
+      error.ipcParams = pending.params;
+      pending.reject(error);
       return;
     }
     pending.resolve(message);
@@ -347,6 +352,35 @@ class DesktopCodexIpcClient {
       .filter(Boolean);
   }
 
+  getRecentNoticeMessages(threadId) {
+    const selectedThreadId = String(threadId || "");
+    return this.events
+      .map((event, index) => {
+        const payload = event.message?.payload || event.message?.params || event.message;
+        const messageThreadId =
+          event.message?.conversationId ||
+          event.message?.conversation_id ||
+          event.message?.threadId ||
+          event.message?.thread_id ||
+          event.message?.params?.conversationId ||
+          event.message?.params?.conversation_id ||
+          event.message?.params?.threadId ||
+          event.message?.params?.thread_id ||
+          "";
+        if (messageThreadId && String(messageThreadId) !== selectedThreadId) return null;
+        const notice = messageFromNoticeEvent(event.timestamp, payload, {
+          source: "desktop-ipc",
+          turnId: event.message?.turnId || event.message?.params?.turnId || null
+        });
+        if (!hasDisplayableMessageContent(notice)) return null;
+        return {
+          ...notice,
+          lineNumber: 1500000 + index
+        };
+      })
+      .filter(Boolean);
+  }
+
   request(method, params = {}, { includeVersion = true, timeoutMs = 12000 } = {}) {
     return new Promise((resolve, reject) => {
       if (!this.socket?.writable) {
@@ -368,7 +402,7 @@ class DesktopCodexIpcClient {
         this.pending.delete(requestId);
         reject(new Error(`${method} timed out`));
       }, timeoutMs);
-      this.pending.set(requestId, { resolve, reject, timer });
+      this.pending.set(requestId, { resolve, reject, timer, method, params });
       this.socket.write(this.encode(message));
     });
   }
@@ -771,6 +805,139 @@ function messageFromInteractionEvent(timestamp, payload, meta = {}) {
   };
 }
 
+const NOTICE_TYPE_PATTERNS = [
+  "notice",
+  "notification",
+  "toast",
+  "banner",
+  "alert",
+  "warning",
+  "error",
+  "limit",
+  "quota",
+  "rate_limit",
+  "usage_limit",
+  "plan_limit"
+];
+
+function isNoticePayload(payload) {
+  const text = [
+    payload?.type,
+    payload?.method,
+    payload?.name,
+    payload?.event,
+    payload?.kind,
+    payload?.code,
+    payload?.errorCode,
+    payload?.payload?.type,
+    payload?.payload?.code,
+    payload?.params?.type,
+    payload?.params?.code
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return NOTICE_TYPE_PATTERNS.some((pattern) => text.includes(pattern));
+}
+
+function noticeSeverity(payload, fallback = "info") {
+  const text = [
+    fallback,
+    payload?.level,
+    payload?.severity,
+    payload?.type,
+    payload?.kind,
+    payload?.code,
+    payload?.errorCode,
+    payload?.resultType,
+    payload?.params?.level,
+    payload?.payload?.level
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (text.includes("error") || text.includes("fail") || text.includes("limit") || text.includes("quota")) return "error";
+  if (text.includes("warn")) return "warning";
+  return fallback || "info";
+}
+
+function noticeTitle(payload, severity = "info") {
+  const text = [
+    payload?.title,
+    payload?.params?.title,
+    payload?.payload?.title,
+    payload?.code,
+    payload?.errorCode,
+    payload?.type,
+    payload?.kind
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (text.includes("limit") || text.includes("quota") || text.includes("rate")) return "Usage limit";
+  if (severity === "error") return "Error";
+  if (severity === "warning") return "Warning";
+  return "Notice";
+}
+
+function noticeContent(payload) {
+  const params = payload?.params || payload?.payload || {};
+  const content = firstString(
+    payload?.message,
+    payload?.error,
+    payload?.description,
+    payload?.body,
+    payload?.text,
+    payload?.title,
+    params?.message,
+    params?.error,
+    params?.description,
+    params?.body,
+    params?.text,
+    params?.title
+  );
+  if (content) return content;
+  return compact(redactLargePayloads(payload), 1800);
+}
+
+function messageFromNoticeEvent(timestamp, payload, meta = {}) {
+  if (!isNoticePayload(payload)) return null;
+  const severity = noticeSeverity(payload);
+  return {
+    role: "notice",
+    kind: severity,
+    timestamp,
+    ...meta,
+    title: noticeTitle(payload, severity),
+    content: noticeContent(payload)
+  };
+}
+
+function recordNotice(threadId, { severity = "info", title = "", content = "", source = "server" } = {}) {
+  if (!threadId || !content) return null;
+  const notice = {
+    id: randomUUID(),
+    threadId: String(threadId),
+    timestamp: new Date().toISOString(),
+    role: "notice",
+    kind: severity,
+    title: title || noticeTitle({ type: severity }, severity),
+    content: String(content).trim(),
+    source,
+    lineNumber: 2000000 + recentNotices.length
+  };
+  recentNotices.push(notice);
+  if (recentNotices.length > 120) recentNotices.splice(0, recentNotices.length - 120);
+  return notice;
+}
+
+function getRecentNoticeMessages(threadId) {
+  const selectedThreadId = String(threadId || "");
+  return recentNotices
+    .filter((notice) => notice.threadId === selectedThreadId)
+    .map((notice, index) => ({ ...notice, lineNumber: notice.lineNumber || 2000000 + index }));
+}
+
 function messageFromEvent(timestamp, payload, meta = {}) {
   if (payload?.type === "user_message") {
     return {
@@ -845,6 +1012,7 @@ async function parseRollout(filePath) {
   const fallbackMessages = [];
   const toolMessages = [];
   const interactionMessages = [];
+  const noticeMessages = [];
   let meta = {};
   let lineNumber = 0;
   let activeTurn = null;
@@ -891,6 +1059,11 @@ async function parseRollout(filePath) {
           interactionMessages.push({ ...interaction, lineNumber });
           continue;
         }
+        const notice = messageFromNoticeEvent(entry.timestamp, entry.payload, messageMeta);
+        if (hasDisplayableMessageContent(notice)) {
+          noticeMessages.push({ ...notice, lineNumber });
+          continue;
+        }
         const msg = messageFromEvent(entry.timestamp, entry.payload, messageMeta);
         if (hasDisplayableMessageContent(msg)) {
           const message = { ...msg, lineNumber };
@@ -903,6 +1076,11 @@ async function parseRollout(filePath) {
         const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload);
         if (hasDisplayableMessageContent(interaction)) {
           interactionMessages.push({ ...interaction, lineNumber });
+          continue;
+        }
+        const notice = messageFromNoticeEvent(entry.timestamp, entry.payload);
+        if (hasDisplayableMessageContent(notice)) {
+          noticeMessages.push({ ...notice, lineNumber });
           continue;
         }
         const msg = messageFromResponseItem(entry.timestamp, entry.payload);
@@ -937,7 +1115,7 @@ async function parseRollout(filePath) {
       startedAtMs: activeTurn?.startedAtMs || null,
       interactionRequired: pendingInteractions.length > 0
     },
-    messages: [...chatMessages, ...interactionMessages, ...toolMessages].sort((a, b) => {
+    messages: [...chatMessages, ...interactionMessages, ...noticeMessages, ...toolMessages].sort((a, b) => {
       if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
       return a.lineNumber - b.lineNumber;
     })
@@ -962,7 +1140,10 @@ async function getMessages(id) {
   }
   const parsed = await parseRollout(rolloutPath);
   const ipcInteractions = codexIpcClient?.getRecentInteractionMessages(id) || [];
-  if (!ipcInteractions.length) return { thread, ...parsed };
+  const ipcNotices = codexIpcClient?.getRecentNoticeMessages(id) || [];
+  const serverNotices = getRecentNoticeMessages(id);
+  const liveMessages = [...ipcInteractions, ...ipcNotices, ...serverNotices];
+  if (!liveMessages.length) return { thread, ...parsed };
   return {
     thread,
     ...parsed,
@@ -970,7 +1151,7 @@ async function getMessages(id) {
       ...parsed.status,
       interactionRequired: parsed.status?.interactionRequired || ipcInteractions.some((message) => message.requiresDesktopAction)
     },
-    messages: [...parsed.messages, ...ipcInteractions].sort((a, b) => {
+    messages: [...parsed.messages, ...liveMessages].sort((a, b) => {
       if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
       return a.lineNumber - b.lineNumber;
     })
@@ -1149,11 +1330,24 @@ async function sendToCodex(text, threadId, images = []) {
   try {
     result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
   } catch (error) {
+    const noticeMessage = error?.message || "Codex Desktop rejected the message.";
     if (error.message === "no-client-found" || error.message.includes("thread-role-timeout")) {
       const err = new Error("Codex Desktop has no open owner for this thread. Open the target conversation in Codex Desktop, then send again.");
       err.status = 409;
+      recordNotice(targetThreadId, {
+        severity: "error",
+        title: "Send failed",
+        content: err.message,
+        source: "send"
+      });
       throw err;
     }
+    recordNotice(targetThreadId, {
+      severity: noticeSeverity(error?.ipcMessage || { type: "error", message: noticeMessage }, "error"),
+      title: noticeTitle(error?.ipcMessage || { type: "error", message: noticeMessage }, "error"),
+      content: noticeMessage,
+      source: "send"
+    });
     throw error;
   }
   return {
