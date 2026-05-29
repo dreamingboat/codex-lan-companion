@@ -11,7 +11,9 @@ const state = {
   config: null,
   authToken: "",
   threadStatus: null,
-  composerBusy: false
+  composerBusy: false,
+  pendingMessages: [],
+  lastMessagesData: null
 };
 
 const els = {
@@ -289,6 +291,8 @@ function lockApp(message = "") {
   state.authToken = "";
   state.config = null;
   state.messagesSignature = "";
+  state.pendingMessages = [];
+  state.lastMessagesData = null;
   els.rememberDevice.checked = false;
   els.authInput.value = "";
   els.threadCount.textContent = t("needAccessCode");
@@ -454,19 +458,87 @@ function messageMetaTop(message, previousUserMessage) {
   return message.kind || "";
 }
 
+function normalizedMessageContent(content) {
+  return String(content || "").replace(/\r\n/g, "\n").trim();
+}
+
+function pendingSignature() {
+  return state.pendingMessages.map((message) => message.id).join(",");
+}
+
+function pendingMessagesForThread(threadId) {
+  return state.pendingMessages.filter((message) => message.threadId === threadId);
+}
+
+function mergePendingMessages(data) {
+  const threadId = data.thread?.id || state.selectedId;
+  const pending = pendingMessagesForThread(threadId);
+  if (!pending.length) return data.messages;
+
+  const realUserContents = new Set(
+    data.messages
+      .filter((message) => message.role === "user")
+      .map((message) => normalizedMessageContent(message.content))
+  );
+  const stillPending = pending.filter((message) => !realUserContents.has(normalizedMessageContent(message.content)));
+  if (stillPending.length !== pending.length) {
+    const stillPendingIds = new Set(stillPending.map((message) => message.id));
+    state.pendingMessages = state.pendingMessages.filter((message) => message.threadId !== threadId || stillPendingIds.has(message.id));
+  }
+  return [...data.messages, ...stillPending];
+}
+
+function renderCurrentMessages(scrollToBottom = true) {
+  const data =
+    state.lastMessagesData || {
+      thread: state.threads.find((thread) => thread.id === state.selectedId) || null,
+      messages: [],
+      status: state.threadStatus || { thinking: false }
+    };
+  renderMessages(data);
+  if (scrollToBottom) {
+    els.messageList.scrollTop = els.messageList.scrollHeight;
+  }
+}
+
+function addPendingUserMessage(threadId, content) {
+  const pending = {
+    id: `pending-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    threadId,
+    role: "user",
+    kind: "pending",
+    timestamp: new Date().toISOString(),
+    content
+  };
+  state.pendingMessages.push(pending);
+  state.messagesSignature = "";
+  renderCurrentMessages(true);
+  return pending.id;
+}
+
+function removePendingMessage(id) {
+  const previousLength = state.pendingMessages.length;
+  state.pendingMessages = state.pendingMessages.filter((message) => message.id !== id);
+  if (state.pendingMessages.length !== previousLength) {
+    state.messagesSignature = "";
+    renderCurrentMessages(true);
+  }
+}
+
 function renderMessages(data) {
   const selected = state.threads.find((thread) => thread.id === state.selectedId);
   els.threadTitle.textContent = selected?.title || data.thread?.title || t("untitled");
+  const displayMessages = mergePendingMessages(data);
   const statusText = data.status?.thinking ? `${t("separator")}${t("thinking")}` : "";
-  els.threadMeta.textContent = `${t("contents", { count: data.messages.length })}${statusText}`;
+  els.threadMeta.textContent = `${t("contents", { count: displayMessages.length })}${statusText}`;
 
-  if (!data.messages.length && !data.status?.thinking) {
+  if (!displayMessages.length && !data.status?.thinking) {
     els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("emptyThread"))}</div>`;
     return;
   }
 
   let previousUserMessage = null;
-  const messageHtml = data.messages
+  const messageHtml = displayMessages
     .map((message) => {
       const isTool = message.role === "tool";
       const hidden = isTool && !state.showTools ? " hidden" : "";
@@ -475,7 +547,7 @@ function renderMessages(data) {
       const metaBottom = formatMessageDate(message.completedAtMs || message.timestamp);
       if (message.role === "user") previousUserMessage = message;
       return `
-        <article class="message ${escapeHtml(message.role)}${hidden}">
+        <article class="message ${escapeHtml(message.role)}${message.kind === "pending" ? " pending" : ""}${hidden}">
           <div class="role">${roleBadge(message)}</div>
           <div class="bubble">
             ${metaTop ? `<div class="message-meta message-meta-top">${escapeHtml(metaTop)}</div>` : ""}
@@ -632,9 +704,10 @@ async function loadMessages(force = false) {
   state.loadingMessages = true;
   try {
     const data = await fetchJson(`/api/threads/${state.selectedId}/messages`);
+    state.lastMessagesData = data;
     state.threadStatus = data.status || null;
     renderComposerMode();
-    const signature = `${data.thread?.updatedAtMs || ""}:${data.size || ""}:${data.mtimeMs || ""}:${state.showTools}:${data.status?.thinking ? "thinking" : "idle"}:${data.status?.turnId || ""}`;
+    const signature = `${data.thread?.updatedAtMs || ""}:${data.size || ""}:${data.mtimeMs || ""}:${state.showTools}:${data.status?.thinking ? "thinking" : "idle"}:${data.status?.turnId || ""}:${pendingSignature()}`;
     if (force || signature !== state.messagesSignature) {
       const wasNearBottom =
         els.messageList.scrollHeight - els.messageList.scrollTop - els.messageList.clientHeight < 120;
@@ -689,6 +762,7 @@ els.threadList.addEventListener("click", (event) => {
   state.selectedId = button.dataset.id;
   state.messagesSignature = "";
   state.threadStatus = null;
+  state.lastMessagesData = null;
   renderComposerMode();
   renderThreads();
   loadMessages(true);
@@ -803,6 +877,7 @@ els.composerForm.addEventListener("submit", async (event) => {
   const thinking = Boolean(state.threadStatus?.thinking);
   const message = els.composerInput.value.trim();
   if (!thinking && !message) return;
+  const pendingMessageId = thinking ? null : addPendingUserMessage(state.selectedId, message);
   state.composerBusy = true;
   renderComposerMode();
   els.sendStatus.textContent = "";
@@ -814,11 +889,14 @@ els.composerForm.addEventListener("submit", async (event) => {
       renderComposerMode();
       refreshSoon();
     } else {
-      await postJson("/api/send", { message, threadId: state.selectedId });
+      const result = await postJson("/api/send", { message, threadId: state.selectedId });
       els.composerInput.value = "";
+      state.threadStatus = { ...(state.threadStatus || {}), thinking: true, turnId: result.turnId || state.threadStatus?.turnId || null };
+      renderComposerMode();
       refreshSoon(1200);
     }
   } catch (error) {
+    if (pendingMessageId) removePendingMessage(pendingMessageId);
     els.sendStatus.textContent = t(thinking ? "interruptFailed" : "sendFailed", { message: error.message });
   } finally {
     state.composerBusy = false;

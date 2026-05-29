@@ -482,6 +482,10 @@ h2 {
   border-color: #d5dff1;
 }
 
+.message.pending .bubble {
+  box-shadow: inset 0 0 0 1px rgba(31, 111, 98, 0.12);
+}
+
 .message.tool .bubble {
   background: var(--tool);
   color: #5b5348;
