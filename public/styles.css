@@ -475,6 +475,7 @@ h2 {
 
 .message-meta-bottom {
   margin-top: 10px;
+  text-align: right;
 }
 
 .message.user .bubble {
