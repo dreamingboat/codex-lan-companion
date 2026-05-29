@@ -12,6 +12,7 @@ const state = {
   authToken: "",
   threadStatus: null,
   composerBusy: false,
+  imageAttachments: [],
   pendingMessages: [],
   lastMessagesData: null
 };
@@ -32,6 +33,9 @@ const els = {
   lockButton: document.querySelector("#lockButton"),
   composerForm: document.querySelector("#composerForm"),
   composerInput: document.querySelector("#composerInput"),
+  imageInput: document.querySelector("#imageInput"),
+  attachmentTray: document.querySelector("#attachmentTray"),
+  attachButton: document.querySelector("#attachButton"),
   sendButton: document.querySelector("#sendButton"),
   sendStatus: document.querySelector("#sendStatus"),
   accountSummary: document.querySelector("#accountSummary"),
@@ -75,6 +79,10 @@ const I18N = {
     send: "发送",
     stop: "停止",
     stopCurrentTask: "停止当前任务",
+    addImage: "添加图片",
+    removeImage: "移除图片",
+    imageTooLarge: "图片过大，单张不能超过 {size} MB。",
+    tooManyImages: "最多只能添加 {count} 张图片。",
     sendToCodex: "发送到当前 Codex 窗口",
     readonlyPlaceholder: "只读模式：启动时加 --write 才能发送",
     readonly: "只读模式",
@@ -139,6 +147,10 @@ const I18N = {
     send: "Send",
     stop: "Stop",
     stopCurrentTask: "Stop current task",
+    addImage: "Add image",
+    removeImage: "Remove image",
+    imageTooLarge: "Image is too large. Each image must be under {size} MB.",
+    tooManyImages: "You can attach up to {count} images.",
     sendToCodex: "Send to current Codex window",
     readonlyPlaceholder: "Read-only: restart with --write to send",
     readonly: "Read-only",
@@ -190,6 +202,8 @@ const dateFormatter = new Intl.DateTimeFormat(state.locale === "zh" ? "zh-CN" : 
   hour: "2-digit",
   minute: "2-digit"
 });
+const MAX_IMAGE_ATTACHMENTS = 4;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 function t(key, values = {}) {
   const text = I18N[state.locale][key] || I18N.en[key] || key;
@@ -222,6 +236,8 @@ function applyStaticText() {
   els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("pickThread"))}</div>`;
   els.accountToggle.setAttribute("title", t("showUsage"));
   els.accountToggle.setAttribute("aria-label", t("showUsage"));
+  els.attachButton.setAttribute("title", t("addImage"));
+  els.attachButton.setAttribute("aria-label", t("addImage"));
   els.sendButton.textContent = t("send");
   els.composerInput.placeholder = t("sendToCodex");
 }
@@ -361,6 +377,102 @@ function renderMarkdownLite(text) {
     .join("");
 }
 
+function imageNameFromPath(value) {
+  return String(value || "").split(/[\\/]/).filter(Boolean).pop() || "image";
+}
+
+function renderMessageImages(message) {
+  const inlineImages = Array.isArray(message.images) ? message.images : [];
+  const localImages = Array.isArray(message.localImages) ? message.localImages : [];
+  if (!inlineImages.length && !localImages.length) return "";
+  const inlineHtml = inlineImages
+    .map((src) => {
+      if (typeof src !== "string" || !src.startsWith("data:image/")) return "";
+      return `<img class="message-image" src="${escapeHtml(src)}" alt="" loading="lazy" />`;
+    })
+    .join("");
+  const localHtml = localImages
+    .map((imagePath) => `<span class="message-image-pill">${escapeHtml(imageNameFromPath(imagePath))}</span>`)
+    .join("");
+  return `<div class="message-images">${inlineHtml}${localHtml}</div>`;
+}
+
+function mimeTypeForFile(file) {
+  if (file.type) return file.type;
+  const name = String(file.name || "").toLowerCase();
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".gif")) return "image/gif";
+  if (name.endsWith(".webp")) return "image/webp";
+  return "";
+}
+
+function fileToImageAttachment(file) {
+  return new Promise((resolve, reject) => {
+    const mimeType = mimeTypeForFile(file);
+    if (!mimeType.startsWith("image/")) {
+      resolve(null);
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      reject(new Error(t("imageTooLarge", { size: Math.round(MAX_IMAGE_BYTES / 1024 / 1024) })));
+      return;
+    }
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const dataUrl = String(reader.result || "");
+      const match = dataUrl.match(/^data:([^;]*);base64,(.+)$/);
+      if (!match) {
+        reject(new Error("Invalid image data"));
+        return;
+      }
+      resolve({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        name: file.name || "image",
+        mimeType: mimeType || match[1] || "image/png",
+        size: file.size,
+        dataUrl,
+        data: match[2]
+      });
+    });
+    reader.addEventListener("error", () => reject(reader.error || new Error("Could not read image")));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderImageAttachments() {
+  els.attachmentTray.hidden = state.imageAttachments.length === 0;
+  els.attachmentTray.innerHTML = state.imageAttachments
+    .map(
+      (image) => `
+        <div class="attachment-item">
+          <img src="${escapeHtml(image.dataUrl)}" alt="" />
+          <span title="${escapeHtml(image.name)}">${escapeHtml(image.name)}</span>
+          <button type="button" data-attachment-id="${escapeHtml(image.id)}" aria-label="${escapeHtml(t("removeImage"))}" title="${escapeHtml(t("removeImage"))}">×</button>
+        </div>
+      `
+    )
+    .join("");
+}
+
+async function addImageFiles(files) {
+  const incoming = Array.from(files || []);
+  if (!incoming.length) return;
+  if (state.imageAttachments.length + incoming.length > MAX_IMAGE_ATTACHMENTS) {
+    els.sendStatus.textContent = t("tooManyImages", { count: MAX_IMAGE_ATTACHMENTS });
+    return;
+  }
+  try {
+    const attachments = (await Promise.all(incoming.map((file) => fileToImageAttachment(file)))).filter(Boolean);
+    state.imageAttachments.push(...attachments);
+    els.sendStatus.textContent = "";
+    renderImageAttachments();
+    renderComposerMode();
+  } catch (error) {
+    els.sendStatus.textContent = error.message;
+  }
+}
+
 function visibleThreads() {
   const query = state.filter.trim().toLowerCase();
   if (!query) return state.threads;
@@ -462,8 +574,12 @@ function normalizedMessageContent(content) {
   return String(content || "").replace(/\r\n/g, "\n").trim();
 }
 
+function messageImageCount(message) {
+  return (Array.isArray(message.images) ? message.images.length : 0) + (Array.isArray(message.localImages) ? message.localImages.length : 0);
+}
+
 function pendingSignature() {
-  return state.pendingMessages.map((message) => message.id).join(",");
+  return state.pendingMessages.map((message) => `${message.id}:${messageImageCount(message)}`).join(",");
 }
 
 function pendingMessagesForThread(threadId) {
@@ -475,12 +591,15 @@ function mergePendingMessages(data) {
   const pending = pendingMessagesForThread(threadId);
   if (!pending.length) return data.messages;
 
-  const realUserContents = new Set(
-    data.messages
-      .filter((message) => message.role === "user")
-      .map((message) => normalizedMessageContent(message.content))
-  );
-  const stillPending = pending.filter((message) => !realUserContents.has(normalizedMessageContent(message.content)));
+  const realUsers = data.messages.filter((message) => message.role === "user");
+  const stillPending = pending.filter((pendingMessage) => {
+    const pendingText = normalizedMessageContent(pendingMessage.content);
+    const pendingImages = messageImageCount(pendingMessage);
+    return !realUsers.some((message) => {
+      if (normalizedMessageContent(message.content) !== pendingText) return false;
+      return messageImageCount(message) >= pendingImages;
+    });
+  });
   if (stillPending.length !== pending.length) {
     const stillPendingIds = new Set(stillPending.map((message) => message.id));
     state.pendingMessages = state.pendingMessages.filter((message) => message.threadId !== threadId || stillPendingIds.has(message.id));
@@ -501,14 +620,15 @@ function renderCurrentMessages(scrollToBottom = true) {
   }
 }
 
-function addPendingUserMessage(threadId, content) {
+function addPendingUserMessage(threadId, content, images = []) {
   const pending = {
     id: `pending-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     threadId,
     role: "user",
     kind: "pending",
     timestamp: new Date().toISOString(),
-    content
+    content,
+    images: images.map((image) => image.dataUrl)
   };
   state.pendingMessages.push(pending);
   state.messagesSignature = "";
@@ -552,7 +672,8 @@ function renderMessages(data) {
           <div class="bubble">
             ${metaTop ? `<div class="message-meta message-meta-top">${escapeHtml(metaTop)}</div>` : ""}
             ${title}
-            ${renderMarkdownLite(message.content || "")}
+            ${message.content ? renderMarkdownLite(message.content) : ""}
+            ${renderMessageImages(message)}
             ${metaBottom ? `<div class="message-meta message-meta-bottom">${escapeHtml(metaBottom)}</div>` : ""}
           </div>
         </article>
@@ -667,6 +788,7 @@ function renderComposerMode() {
   const allowWrite = Boolean(state.config?.allowWrite);
   const thinking = Boolean(state.threadStatus?.thinking);
   els.composerInput.disabled = !allowWrite || state.composerBusy;
+  els.attachButton.disabled = !allowWrite || state.composerBusy;
   els.sendButton.disabled = !allowWrite || state.composerBusy;
   els.sendButton.classList.toggle("stop-mode", allowWrite && thinking);
   els.sendButton.textContent = allowWrite && thinking ? "■" : t("send");
@@ -870,14 +992,33 @@ els.composerInput.addEventListener("keydown", (event) => {
   }
 });
 
+els.attachButton.addEventListener("click", () => {
+  if (els.attachButton.disabled) return;
+  els.imageInput.click();
+});
+
+els.imageInput.addEventListener("change", async (event) => {
+  await addImageFiles(event.target.files);
+  event.target.value = "";
+});
+
+els.attachmentTray.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-attachment-id]");
+  if (!button) return;
+  state.imageAttachments = state.imageAttachments.filter((image) => image.id !== button.dataset.attachmentId);
+  renderImageAttachments();
+  renderComposerMode();
+});
+
 els.composerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.config?.allowWrite) return;
   if (state.composerBusy) return;
   const thinking = Boolean(state.threadStatus?.thinking);
   const message = els.composerInput.value.trim();
-  if (!thinking && !message) return;
-  const pendingMessageId = thinking ? null : addPendingUserMessage(state.selectedId, message);
+  const images = [...state.imageAttachments];
+  if (!thinking && !message && !images.length) return;
+  const pendingMessageId = thinking ? null : addPendingUserMessage(state.selectedId, message, images);
   state.composerBusy = true;
   renderComposerMode();
   els.sendStatus.textContent = "";
@@ -889,8 +1030,14 @@ els.composerForm.addEventListener("submit", async (event) => {
       renderComposerMode();
       refreshSoon();
     } else {
-      const result = await postJson("/api/send", { message, threadId: state.selectedId });
+      const result = await postJson("/api/send", {
+        message,
+        threadId: state.selectedId,
+        images: images.map(({ name, mimeType, data }) => ({ name, mimeType, data }))
+      });
       els.composerInput.value = "";
+      state.imageAttachments = [];
+      renderImageAttachments();
       state.threadStatus = { ...(state.threadStatus || {}), thinking: true, turnId: result.turnId || state.threadStatus?.turnId || null };
       renderComposerMode();
       refreshSoon(1200);

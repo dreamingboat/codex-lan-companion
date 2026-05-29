@@ -87,6 +87,9 @@ const STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const SESSION_INDEX = path.join(CODEX_HOME, "session_index.jsonl");
 const AUTH_FILE = path.join(CODEX_HOME, "auth.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
+const MAX_SEND_IMAGES = 4;
+const MAX_SEND_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_SEND_BODY_BYTES = 32 * 1024 * 1024;
 const IPC_VERSION_BY_METHOD = {
   "thread-follower-start-turn": 1,
   "thread-follower-interrupt-turn": 1
@@ -319,12 +322,24 @@ class DesktopCodexIpcClient {
     });
   }
 
-  async startTurn(threadId, text) {
+  async startTurn(threadId, text, images = []) {
     await this.ensureReady();
+    const input = [];
+    if (text) input.push({ type: "text", text, text_elements: [] });
+    for (const image of images) {
+      input.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: image.mimeType,
+          data: image.data
+        }
+      });
+    }
     return this.request("thread-follower-start-turn", {
       conversationId: threadId,
       turnStartParams: {
-        input: [{ type: "text", text, text_elements: [] }],
+        input,
         attachments: []
       }
     });
@@ -550,6 +565,17 @@ function textFromContent(content) {
     .join("\n");
 }
 
+function imagesFromContent(content) {
+  if (!Array.isArray(content)) return [];
+  return content
+    .map((part) => {
+      const source = part?.source || {};
+      if (part?.type !== "image" || source.type !== "base64" || !source.data || !source.media_type) return null;
+      return `data:${source.media_type};base64,${source.data}`;
+    })
+    .filter(Boolean);
+}
+
 function stripCodexDirectives(text) {
   return String(text || "")
     .split(/\r?\n/)
@@ -566,7 +592,15 @@ function compact(value, limit = 6000) {
 
 function messageFromEvent(timestamp, payload, meta = {}) {
   if (payload?.type === "user_message") {
-    return { role: "user", kind: "message", timestamp, ...meta, content: stripCodexDirectives(payload.message) };
+    return {
+      role: "user",
+      kind: "message",
+      timestamp,
+      ...meta,
+      content: stripCodexDirectives(payload.message),
+      images: Array.isArray(payload.images) ? payload.images : [],
+      localImages: Array.isArray(payload.local_images) ? payload.local_images : []
+    };
   }
   if (payload?.type === "agent_message") {
     return {
@@ -605,10 +639,15 @@ function messageFromResponseItem(timestamp, payload) {
       role: payload.role || "assistant",
       kind: "message",
       timestamp,
-      content: stripCodexDirectives(textFromContent(payload.content))
+      content: stripCodexDirectives(textFromContent(payload.content)),
+      images: imagesFromContent(payload.content)
     };
   }
   return null;
+}
+
+function hasDisplayableMessageContent(message) {
+  return Boolean(message?.content || message?.images?.length || message?.localImages?.length);
 }
 
 function isTurnEndEvent(payload) {
@@ -665,7 +704,7 @@ async function parseRollout(filePath) {
           turnId: activeTurn?.turnId || null,
           turnStartedAtMs: activeTurn?.startedAtMs || null
         });
-        if (msg?.content) {
+        if (hasDisplayableMessageContent(msg)) {
           const message = { ...msg, lineNumber };
           eventMessages.push(message);
           if (message.role === "assistant" && message.turnId) assistantMessagesByTurn.set(message.turnId, message);
@@ -674,7 +713,7 @@ async function parseRollout(filePath) {
       }
       if (entry.type === "response_item") {
         const msg = messageFromResponseItem(entry.timestamp, entry.payload);
-        if (!msg?.content) continue;
+        if (!hasDisplayableMessageContent(msg)) continue;
         if (msg.role === "tool") toolMessages.push({ ...msg, lineNumber });
         else fallbackMessages.push({ ...msg, lineNumber });
       }
@@ -727,14 +766,46 @@ async function getMessages(id) {
   return { thread, ...parsed };
 }
 
-async function sendToCodex(text, threadId) {
+function normalizeSendImages(images) {
+  if (!Array.isArray(images)) return [];
+  if (images.length > MAX_SEND_IMAGES) {
+    const err = new Error(`Too many images. Maximum is ${MAX_SEND_IMAGES}.`);
+    err.status = 400;
+    throw err;
+  }
+  return images.map((image, index) => {
+    const mimeType = String(image?.mimeType || "").trim().toLowerCase();
+    const data = String(image?.data || "").replace(/^data:[^;]+;base64,/, "");
+    const name = String(image?.name || `image-${index + 1}`).slice(0, 120);
+    if (!mimeType.startsWith("image/")) {
+      const err = new Error("Only image attachments are supported");
+      err.status = 400;
+      throw err;
+    }
+    if (!data || !/^[a-zA-Z0-9+/=]+$/.test(data)) {
+      const err = new Error("Invalid image data");
+      err.status = 400;
+      throw err;
+    }
+    const byteLength = Buffer.byteLength(data, "base64");
+    if (byteLength > MAX_SEND_IMAGE_BYTES) {
+      const err = new Error(`Image is too large. Maximum is ${Math.round(MAX_SEND_IMAGE_BYTES / 1024 / 1024)} MB.`);
+      err.status = 400;
+      throw err;
+    }
+    return { name, mimeType, data, size: byteLength };
+  });
+}
+
+async function sendToCodex(text, threadId, images = []) {
   if (!ALLOW_WRITE) {
     const err = new Error("Write mode is disabled. Restart with --write to send messages to Codex Desktop.");
     err.status = 403;
     throw err;
   }
   const trimmed = String(text || "").trim();
-  if (!trimmed) {
+  const normalizedImages = normalizeSendImages(images);
+  if (!trimmed && !normalizedImages.length) {
     const err = new Error("Message is empty");
     err.status = 400;
     throw err;
@@ -758,7 +829,7 @@ async function sendToCodex(text, threadId) {
 
   let result;
   try {
-    result = await getCodexIpcClient().startTurn(targetThreadId, trimmed);
+    result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
   } catch (error) {
     if (error.message === "no-client-found" || error.message.includes("thread-role-timeout")) {
       const err = new Error("Codex Desktop has no open owner for this thread. Open the target conversation in Codex Desktop, then send again.");
@@ -771,6 +842,7 @@ async function sendToCodex(text, threadId) {
     ok: true,
     mode: "desktop-ipc",
     threadId: targetThreadId,
+    images: normalizedImages.map(({ name, mimeType, size }) => ({ name, mimeType, size })),
     turnId: result?.result?.turn?.id || result?.result?.turnId || null,
     sentAt: new Date().toISOString()
   };
@@ -857,8 +929,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/send") {
       if (!requireAuthorized(req, res, url)) return;
-      const body = await readJsonBody(req);
-      sendJson(res, 200, await sendToCodex(body.message, body.threadId));
+      const body = await readJsonBody(req, MAX_SEND_BODY_BYTES);
+      sendJson(res, 200, await sendToCodex(body.message, body.threadId, body.images));
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/interrupt") {

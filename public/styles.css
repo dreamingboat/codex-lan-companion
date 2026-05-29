@@ -488,6 +488,36 @@ h2 {
   text-align: right;
 }
 
+.message-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-image {
+  display: block;
+  width: min(180px, 100%);
+  max-height: 180px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  object-fit: cover;
+}
+
+.message-image-pill {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 6px 8px;
+}
+
 .message.user .bubble {
   background: var(--user);
   border-color: #d5dff1;
@@ -589,6 +619,66 @@ h2 {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.attachment-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attachment-tray[hidden] {
+  display: none;
+}
+
+.attachment-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  width: min(100%, 220px);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f7f6f2;
+  padding: 5px 30px 5px 5px;
+}
+
+.attachment-item img {
+  width: 42px;
+  height: 42px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.attachment-item span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-item button {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.attachment-item button:hover {
+  color: var(--text);
+}
+
 .composer-actions {
   display: flex;
   align-items: center;
@@ -613,6 +703,23 @@ h2 {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-buttons {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.attach-button {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.attach-button:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .account-widget {
@@ -905,6 +1012,19 @@ h2 {
 
   .composer-left {
     gap: 6px;
+  }
+
+  .composer-buttons {
+    gap: 6px;
+  }
+
+  .attach-button {
+    width: 36px;
+    height: 36px;
+  }
+
+  .attachment-item {
+    width: min(100%, 190px);
   }
 
   .send-status {

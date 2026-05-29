@@ -72,6 +72,8 @@
             placeholder="发送到当前 Codex 窗口"
             autocomplete="off"
           ></textarea>
+          <input id="imageInput" type="file" accept="image/*" multiple hidden />
+          <div id="attachmentTray" class="attachment-tray" hidden></div>
           <div class="composer-actions">
             <div class="composer-left">
               <div class="account-widget">
@@ -92,7 +94,10 @@
               </div>
               <span id="sendStatus" class="send-status" aria-live="polite"></span>
             </div>
-            <button id="sendButton" class="send-button" type="submit">发送</button>
+            <div class="composer-buttons">
+              <button id="attachButton" class="icon-button attach-button" type="button" title="添加图片" aria-label="添加图片">+</button>
+              <button id="sendButton" class="send-button" type="submit">发送</button>
+            </div>
           </div>
           <div id="accountPanel" class="account-panel" hidden></div>
         </form>
