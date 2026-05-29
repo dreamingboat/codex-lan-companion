@@ -210,6 +210,7 @@ class DesktopCodexIpcClient {
     this.pending = new Map();
     this.ready = null;
     this.clientId = null;
+    this.events = [];
   }
 
   async ensureReady() {
@@ -289,9 +290,15 @@ class DesktopCodexIpcClient {
   }
 
   handleMessage(message) {
-    if (message.type !== "response" || !message.requestId) return;
+    if (message.type !== "response" || !message.requestId) {
+      this.captureEvent(message);
+      return;
+    }
     const pending = this.pending.get(message.requestId);
-    if (!pending) return;
+    if (!pending) {
+      this.captureEvent(message);
+      return;
+    }
     this.pending.delete(message.requestId);
     clearTimeout(pending.timer);
     if (message.resultType === "error") {
@@ -299,6 +306,45 @@ class DesktopCodexIpcClient {
       return;
     }
     pending.resolve(message);
+  }
+
+  captureEvent(message) {
+    if (!message || typeof message !== "object") return;
+    this.events.push({
+      timestamp: new Date().toISOString(),
+      message
+    });
+    if (this.events.length > 120) this.events.splice(0, this.events.length - 120);
+  }
+
+  getRecentInteractionMessages(threadId) {
+    const selectedThreadId = String(threadId || "");
+    return this.events
+      .map((event, index) => {
+        const payload = event.message?.payload || event.message?.params || event.message;
+        const messageThreadId =
+          event.message?.conversationId ||
+          event.message?.conversation_id ||
+          event.message?.threadId ||
+          event.message?.thread_id ||
+          event.message?.params?.conversationId ||
+          event.message?.params?.conversation_id ||
+          event.message?.params?.threadId ||
+          event.message?.params?.thread_id ||
+          "";
+        if (messageThreadId && String(messageThreadId) !== selectedThreadId) return null;
+        const interaction = messageFromInteractionEvent(event.timestamp, payload, {
+          source: "desktop-ipc",
+          turnId: event.message?.turnId || event.message?.params?.turnId || null
+        });
+        if (!hasDisplayableMessageContent(interaction)) return null;
+        return {
+          ...interaction,
+          lineNumber: 1000000 + index,
+          requiresDesktopAction: true
+        };
+      })
+      .filter(Boolean);
   }
 
   request(method, params = {}, { includeVersion = true, timeoutMs = 12000 } = {}) {
@@ -591,6 +637,140 @@ function compact(value, limit = 6000) {
   return `${text.slice(0, limit)}\n\n... truncated ${text.length - limit} chars`;
 }
 
+const INTERACTION_TYPE_PATTERNS = [
+  "approval",
+  "permission",
+  "permissions",
+  "elicitation",
+  "request_user_input",
+  "user_input_request",
+  "terminal_interaction",
+  "dynamic_tool_call_request",
+  "command_approval",
+  "file_approval"
+];
+
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (Array.isArray(value) && value.length) {
+      const joined = value
+        .map((part) => (typeof part === "string" ? part : ""))
+        .filter(Boolean)
+        .join(" ");
+      if (joined.trim()) return joined.trim();
+    }
+  }
+  return "";
+}
+
+function redactLargePayloads(value, depth = 0) {
+  if (depth > 5) return "[nested payload]";
+  if (typeof value === "string") {
+    if (value.length > 240 && /^[A-Za-z0-9+/]+={0,2}$/.test(value)) return `[base64 data ${value.length} chars]`;
+    if (value.length > 1200) return `${value.slice(0, 1200)}...`;
+    return value;
+  }
+  if (Array.isArray(value)) return value.slice(0, 20).map((item) => redactLargePayloads(item, depth + 1));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => {
+      const normalizedKey = key.toLowerCase();
+      if (normalizedKey.includes("image") || normalizedKey.includes("base64") || normalizedKey === "data") {
+        if (typeof item === "string") return [key, `[omitted ${item.length} chars]`];
+        return [key, "[omitted binary payload]"];
+      }
+      return [key, redactLargePayloads(item, depth + 1)];
+    })
+  );
+}
+
+function isInteractionPayload(payload) {
+  const text = [
+    payload?.type,
+    payload?.method,
+    payload?.name,
+    payload?.event,
+    payload?.kind,
+    payload?.payload?.type,
+    payload?.params?.type
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return INTERACTION_TYPE_PATTERNS.some((pattern) => text.includes(pattern));
+}
+
+function interactionTitle(payload) {
+  const type = String(payload?.type || payload?.method || payload?.name || payload?.kind || "").toLowerCase();
+  if (type.includes("command")) return "Command approval requested";
+  if (type.includes("file")) return "File approval requested";
+  if (type.includes("permission")) return "Permission requested";
+  if (type.includes("elicitation")) return "Additional information requested";
+  if (type.includes("user_input")) return "User input requested";
+  if (type.includes("terminal")) return "Terminal interaction requested";
+  if (type.includes("tool")) return "Tool interaction requested";
+  return "Codex interaction requested";
+}
+
+function interactionContent(payload) {
+  const params = payload?.params || payload?.payload || {};
+  const request = payload?.request || params?.request || {};
+  const toolCall = payload?.tool_call || params?.tool_call || params?.toolCall || {};
+  const command = firstString(
+    payload?.command,
+    params?.command,
+    request?.command,
+    payload?.cmd,
+    params?.cmd,
+    toolCall?.command,
+    toolCall?.name
+  );
+  const pathValue = firstString(payload?.path, params?.path, request?.path, payload?.file_path, params?.file_path, request?.file_path);
+  const prompt = firstString(
+    payload?.message,
+    params?.message,
+    request?.message,
+    payload?.prompt,
+    params?.prompt,
+    payload?.question,
+    params?.question,
+    request?.question,
+    payload?.reason,
+    params?.reason,
+    request?.reason
+  );
+  const choices = Array.isArray(payload?.options)
+    ? payload.options
+    : Array.isArray(params?.options)
+      ? params.options
+      : Array.isArray(request?.options)
+        ? request.options
+        : [];
+  const lines = [
+    prompt ? `Prompt: ${prompt}` : "",
+    command ? `Command: ${command}` : "",
+    pathValue ? `Path: ${pathValue}` : "",
+    choices.length ? `Options: ${choices.map((option) => firstString(option?.label, option?.title, option?.id, option)).filter(Boolean).join(", ")}` : ""
+  ].filter(Boolean);
+  if (lines.length) return lines.join("\n\n");
+  return compact(redactLargePayloads(payload), 2400);
+}
+
+function messageFromInteractionEvent(timestamp, payload, meta = {}) {
+  if (!isInteractionPayload(payload)) return null;
+  return {
+    role: "interaction",
+    kind: payload?.type || payload?.method || payload?.name || "interaction",
+    timestamp,
+    ...meta,
+    title: interactionTitle(payload),
+    requestId: payload?.request_id || payload?.requestId || payload?.id || payload?.call_id || payload?.params?.request_id || null,
+    content: interactionContent(payload),
+    requiresDesktopAction: true
+  };
+}
+
 function messageFromEvent(timestamp, payload, meta = {}) {
   if (payload?.type === "user_message") {
     return {
@@ -664,6 +844,7 @@ async function parseRollout(filePath) {
   const eventMessages = [];
   const fallbackMessages = [];
   const toolMessages = [];
+  const interactionMessages = [];
   let meta = {};
   let lineNumber = 0;
   let activeTurn = null;
@@ -701,10 +882,16 @@ async function parseRollout(filePath) {
           if (turnId && activeTurn?.turnId === turnId) activeTurn = null;
           continue;
         }
-        const msg = messageFromEvent(entry.timestamp, entry.payload, {
+        const messageMeta = {
           turnId: activeTurn?.turnId || null,
           turnStartedAtMs: activeTurn?.startedAtMs || null
-        });
+        };
+        const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
+        if (hasDisplayableMessageContent(interaction)) {
+          interactionMessages.push({ ...interaction, lineNumber });
+          continue;
+        }
+        const msg = messageFromEvent(entry.timestamp, entry.payload, messageMeta);
         if (hasDisplayableMessageContent(msg)) {
           const message = { ...msg, lineNumber };
           eventMessages.push(message);
@@ -713,6 +900,11 @@ async function parseRollout(filePath) {
         continue;
       }
       if (entry.type === "response_item") {
+        const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload);
+        if (hasDisplayableMessageContent(interaction)) {
+          interactionMessages.push({ ...interaction, lineNumber });
+          continue;
+        }
         const msg = messageFromResponseItem(entry.timestamp, entry.payload);
         if (!hasDisplayableMessageContent(msg)) continue;
         if (msg.role === "tool") toolMessages.push({ ...msg, lineNumber });
@@ -730,6 +922,10 @@ async function parseRollout(filePath) {
   }
 
   const chatMessages = eventMessages.length ? eventMessages : fallbackMessages;
+  for (const message of interactionMessages) {
+    message.requiresDesktopAction = Boolean(activeTurn && (!message.turnId || message.turnId === activeTurn.turnId));
+  }
+  const pendingInteractions = interactionMessages.filter((message) => message.requiresDesktopAction);
   const result = {
     meta,
     file: filePath,
@@ -738,9 +934,10 @@ async function parseRollout(filePath) {
     status: {
       thinking: Boolean(activeTurn),
       turnId: activeTurn?.turnId || null,
-      startedAtMs: activeTurn?.startedAtMs || null
+      startedAtMs: activeTurn?.startedAtMs || null,
+      interactionRequired: pendingInteractions.length > 0
     },
-    messages: [...chatMessages, ...toolMessages].sort((a, b) => {
+    messages: [...chatMessages, ...interactionMessages, ...toolMessages].sort((a, b) => {
       if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
       return a.lineNumber - b.lineNumber;
     })
@@ -764,7 +961,20 @@ async function getMessages(id) {
     throw err;
   }
   const parsed = await parseRollout(rolloutPath);
-  return { thread, ...parsed };
+  const ipcInteractions = codexIpcClient?.getRecentInteractionMessages(id) || [];
+  if (!ipcInteractions.length) return { thread, ...parsed };
+  return {
+    thread,
+    ...parsed,
+    status: {
+      ...parsed.status,
+      interactionRequired: parsed.status?.interactionRequired || ipcInteractions.some((message) => message.requiresDesktopAction)
+    },
+    messages: [...parsed.messages, ...ipcInteractions].sort((a, b) => {
+      if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
+      return a.lineNumber - b.lineNumber;
+    })
+  };
 }
 
 function normalizeSendImages(images) {

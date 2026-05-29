@@ -75,6 +75,9 @@ const I18N = {
     pickThread: "从左侧选择一个 Codex 对话。",
     tool: "工具",
     roleTool: "工具",
+    roleInteraction: "交互",
+    interactionRequired: "需要处理",
+    interactionDesktopAction: "请在桌面 Codex 处理",
     showUsage: "显示套餐用量",
     send: "发送",
     stop: "停止",
@@ -145,6 +148,9 @@ const I18N = {
     pickThread: "Select a Codex conversation from the left.",
     tool: "Tools",
     roleTool: "Tool",
+    roleInteraction: "Interaction",
+    interactionRequired: "Action required",
+    interactionDesktopAction: "Handle this in Codex desktop",
     showUsage: "Show plan usage",
     send: "Send",
     stop: "Stop",
@@ -570,6 +576,7 @@ function roleLabel(message) {
   if (message.role === "assistant") return "Codex";
   if (message.role === "user") return "User";
   if (message.role === "tool") return t("roleTool");
+  if (message.role === "interaction") return t("roleInteraction");
   return message.role || "System";
 }
 
@@ -589,6 +596,15 @@ function roleIcon(message) {
     return `
       <svg class="role-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M14.5 5.5 18.5 9.5M16.5 3.5l4 4-11 11H5.5v-4z"></path>
+      </svg>
+    `;
+  }
+  if (message.role === "interaction") {
+    return `
+      <svg class="role-icon-svg interaction-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 9v4"></path>
+        <path d="M12 17h.01"></path>
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
       </svg>
     `;
   }
@@ -616,6 +632,7 @@ function messageMetaTop(message, previousUserMessage) {
     return duration ? `${t("processed")} ${duration}` : t("processed");
   }
   if (message.role === "tool") return message.kind || t("tool");
+  if (message.role === "interaction") return message.requiresDesktopAction ? t("interactionRequired") : message.kind || t("roleInteraction");
   return message.kind || "";
 }
 
@@ -698,7 +715,11 @@ function renderMessages(data) {
   const selected = state.threads.find((thread) => thread.id === state.selectedId);
   els.threadTitle.textContent = selected?.title || data.thread?.title || t("untitled");
   const displayMessages = mergePendingMessages(data);
-  const statusText = data.status?.thinking ? `${t("separator")}${t("thinking")}` : "";
+  const statusText = data.status?.interactionRequired
+    ? `${t("separator")}${t("interactionRequired")}`
+    : data.status?.thinking
+      ? `${t("separator")}${t("thinking")}`
+      : "";
   els.threadMeta.textContent = `${t("contents", { count: displayMessages.length })}${statusText}`;
 
   if (!displayMessages.length && !data.status?.thinking) {
@@ -710,8 +731,14 @@ function renderMessages(data) {
   const messageHtml = displayMessages
     .map((message) => {
       const isTool = message.role === "tool";
+      const isInteraction = message.role === "interaction";
       const hidden = isTool && !state.showTools ? " hidden" : "";
-      const title = isTool ? `<div class="tool-title">${escapeHtml(message.kind)}${t("separator")}${escapeHtml(message.title || "")}</div>` : "";
+      const title =
+        isTool || isInteraction
+          ? `<div class="${isInteraction ? "interaction-title" : "tool-title"}">${escapeHtml(
+              isInteraction ? t("interactionDesktopAction") : message.kind
+            )}${isTool ? `${t("separator")}${escapeHtml(message.title || "")}` : ""}</div>`
+          : "";
       const metaTop = messageMetaTop(message, previousUserMessage);
       const metaBottom = formatMessageDate(message.completedAtMs || message.timestamp);
       if (message.role === "user") previousUserMessage = message;
@@ -878,7 +905,7 @@ async function loadMessages(force = false) {
     state.lastMessagesData = data;
     state.threadStatus = data.status || null;
     renderComposerMode();
-    const signature = `${data.thread?.updatedAtMs || ""}:${data.size || ""}:${data.mtimeMs || ""}:${state.showTools}:${data.status?.thinking ? "thinking" : "idle"}:${data.status?.turnId || ""}:${pendingSignature()}`;
+    const signature = `${data.thread?.updatedAtMs || ""}:${data.size || ""}:${data.mtimeMs || ""}:${state.showTools}:${data.status?.thinking ? "thinking" : "idle"}:${data.status?.interactionRequired ? "interaction" : "clear"}:${data.status?.turnId || ""}:${pendingSignature()}`;
     if (force || signature !== state.messagesSignature) {
       const wasNearBottom =
         els.messageList.scrollHeight - els.messageList.scrollTop - els.messageList.clientHeight < 120;

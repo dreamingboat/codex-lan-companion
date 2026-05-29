@@ -11,6 +11,7 @@
   --user: #e8f0ff;
   --assistant: #ffffff;
   --tool: #f4efe6;
+  --interaction: #fff4d8;
   --shadow: 0 10px 26px rgba(38, 35, 31, 0.08);
 }
 
@@ -532,6 +533,21 @@ h2 {
   color: #5b5348;
 }
 
+.message.interaction .bubble {
+  border-color: #d8b75a;
+  background: var(--interaction);
+  color: #3d3216;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), inset 3px 0 0 #d5a82d;
+}
+
+.message.interaction .message-meta {
+  color: #806724;
+}
+
+.interaction-icon {
+  color: #a27308;
+}
+
 .message.tool.hidden {
   display: none;
 }
@@ -590,6 +606,13 @@ h2 {
   color: #776c5e;
   font-size: 12px;
   font-weight: 700;
+}
+
+.interaction-title {
+  margin-bottom: 8px;
+  color: #5e470d;
+  font-size: 13px;
+  font-weight: 750;
 }
 
 .composer {
