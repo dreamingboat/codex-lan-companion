@@ -358,14 +358,24 @@ h2 {
   padding-left: 64px;
 }
 
-.conversation-header > div {
+.conversation-title {
+  flex: 1 1 auto;
   min-width: 0;
+}
+
+.conversation-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
 }
 
 .toggle {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  min-height: 34px;
+  padding: 0 2px;
   color: var(--muted);
   font-size: 13px;
   white-space: nowrap;
@@ -835,8 +845,23 @@ h2 {
   }
 
   h2 {
-    max-width: 68vw;
+    max-width: min(62vw, calc(100vw - 174px));
     font-size: 15px;
+  }
+
+  .conversation-actions {
+    gap: 7px;
+  }
+
+  .conversation-actions .icon-button {
+    width: 32px;
+    height: 32px;
+  }
+
+  .toggle {
+    min-height: 32px;
+    gap: 5px;
+    font-size: 12px;
   }
 
   .message-list {

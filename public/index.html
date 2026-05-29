@@ -39,7 +39,6 @@
             <p id="threadCount">加载中</p>
           </div>
           <div class="sidebar-actions">
-            <button id="refreshButton" class="icon-button" title="刷新">↻</button>
             <button id="sidebarCloseButton" class="icon-button" title="隐藏对话列表" aria-label="隐藏对话列表">‹</button>
           </div>
         </div>
@@ -49,15 +48,18 @@
 
       <section class="conversation">
         <header class="conversation-header">
-          <div>
+          <div class="conversation-title">
             <h2 id="threadTitle">选择一个对话</h2>
             <p id="threadMeta">每 3 秒自动同步</p>
           </div>
-          <label class="toggle">
-            <input id="toolToggle" type="checkbox" />
-            <span>工具</span>
-          </label>
-          <button id="lockButton" class="icon-button" type="button" title="已锁定" aria-label="已锁定">🔒</button>
+          <div class="conversation-actions">
+            <button id="refreshButton" class="icon-button" type="button" title="刷新">↻</button>
+            <label class="toggle">
+              <input id="toolToggle" type="checkbox" />
+              <span>工具</span>
+            </label>
+            <button id="lockButton" class="icon-button" type="button" title="已锁定" aria-label="已锁定">🔒</button>
+          </div>
         </header>
         <div id="messageList" class="message-list">
           <div class="empty-state">从左侧选择一个 Codex 对话。</div>
