@@ -11,8 +11,8 @@
   --user: #e8f0ff;
   --assistant: #ffffff;
   --tool: #f4efe6;
-  --interaction: #fff4d8;
-  --notice: #fff0f0;
+  --notice: #fff4d8;
+  --interaction: #fff0f0;
   --shadow: 0 10px 26px rgba(38, 35, 31, 0.08);
 }
 
@@ -275,6 +275,13 @@ h2 {
   display: none;
 }
 
+.thread-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin: 0 16px 12px;
+}
+
 .search {
   width: calc(100% - 32px);
   margin: 0 16px 12px;
@@ -286,9 +293,45 @@ h2 {
   outline: none;
 }
 
+.thread-search-row .search {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
 .search:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.new-thread-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  background: #29477f;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1;
+  padding: 0 13px;
+  white-space: nowrap;
+}
+
+.new-thread-button span:first-child {
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 0.8;
+}
+
+.new-thread-button:disabled {
+  cursor: default;
+  opacity: 0.62;
 }
 
 .thread-list {
@@ -327,6 +370,10 @@ h2 {
   border-color: #c8d8d4;
   background: var(--panel);
   box-shadow: var(--shadow);
+}
+
+.thread-item.draft .thread-title {
+  color: var(--accent);
 }
 
 .thread-title {
@@ -535,33 +582,33 @@ h2 {
 }
 
 .message.interaction .bubble {
-  border-color: #d8b75a;
-  background: var(--interaction);
-  color: #3d3216;
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), inset 3px 0 0 #d5a82d;
-}
-
-.message.interaction .message-meta {
-  color: #806724;
-}
-
-.interaction-icon {
-  color: #a27308;
-}
-
-.message.notice .bubble {
   border-color: #e1aaa6;
-  background: var(--notice);
+  background: var(--interaction);
   color: #4a211f;
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), inset 3px 0 0 #c75b55;
 }
 
-.message.notice .message-meta {
+.message.interaction .message-meta {
   color: #95524d;
 }
 
-.notice-icon {
+.interaction-icon {
   color: #b13b35;
+}
+
+.message.notice .bubble {
+  border-color: #d8b75a;
+  background: var(--notice);
+  color: #3d3216;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), inset 3px 0 0 #d5a82d;
+}
+
+.message.notice .message-meta {
+  color: #806724;
+}
+
+.notice-icon {
+  color: #a27308;
 }
 
 .message.tool.hidden {
@@ -626,16 +673,95 @@ h2 {
 
 .interaction-title {
   margin-bottom: 8px;
+  color: #7d2c28;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.approval-action {
+  min-height: 32px;
+  border: 1px solid rgba(134, 103, 23, 0.28);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #5b4510;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.1;
+  padding: 7px 12px;
+}
+
+.approval-action.primary {
+  border-color: rgba(39, 112, 92, 0.28);
+  background: #eaf4ef;
+  color: #1f5f50;
+}
+
+.approval-action.secondary {
+  color: #6d4c18;
+}
+
+.approval-action:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.approval-result {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  margin-top: 12px;
+  border: 1px solid rgba(39, 112, 92, 0.18);
+  border-radius: 7px;
+  background: rgba(234, 244, 239, 0.82);
+  color: #1f5f50;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 6px 10px;
+}
+
+.approval-result.pending {
+  border-color: rgba(134, 103, 23, 0.22);
+  background: rgba(255, 255, 255, 0.62);
+  color: #6d4c18;
+}
+
+.notice-title {
   color: #5e470d;
   font-size: 13px;
   font-weight: 750;
 }
 
-.notice-title {
+.notice-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
   margin-bottom: 8px;
-  color: #7d2c28;
-  font-size: 13px;
-  font-weight: 750;
+}
+
+.notice-collapse-button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  border: 1px solid rgba(94, 71, 13, 0.18);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.68);
+  color: #5e470d;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 6px 9px;
 }
 
 .composer {
@@ -974,10 +1100,22 @@ h2 {
     font-size: 19px;
   }
 
-  .search {
-    width: calc(100% - 24px);
+  .thread-search-row {
+    gap: 6px;
     margin: 0 12px 8px;
+  }
+
+  .search {
+    width: 100%;
+    margin: 0;
     padding: 9px 10px;
+  }
+
+  .new-thread-button {
+    min-height: 36px;
+    gap: 5px;
+    font-size: 13px;
+    padding: 0 10px;
   }
 
   .thread-list {

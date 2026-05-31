@@ -1,9 +1,11 @@
 const state = {
   threads: [],
   selectedId: null,
+  draftThread: null,
   messagesSignature: "",
   filter: "",
   showTools: false,
+  expandedNotices: {},
   sidebarCollapsed: false,
   loadingMessages: false,
   account: null,
@@ -14,6 +16,7 @@ const state = {
   composerBusy: false,
   imageAttachments: [],
   pendingMessages: [],
+  approvalSubmissions: {},
   lastMessagesData: null
 };
 
@@ -29,6 +32,7 @@ const els = {
   drawerOverlay: document.querySelector("#drawerOverlay"),
   sidebarCloseButton: document.querySelector("#sidebarCloseButton"),
   searchInput: document.querySelector("#searchInput"),
+  newThreadButton: document.querySelector("#newThreadButton"),
   toolToggle: document.querySelector("#toolToggle"),
   lockButton: document.querySelector("#lockButton"),
   composerForm: document.querySelector("#composerForm"),
@@ -69,6 +73,10 @@ const I18N = {
     refresh: "刷新",
     loading: "加载中",
     searchThreads: "搜索对话",
+    newConversation: "新对话",
+    newConversationDraft: "新对话",
+    newConversationReady: "输入消息开始新对话。",
+    newConversationFailed: "新建对话失败：{message}",
     threadList: "对话列表",
     selectThread: "选择一个对话",
     syncEvery: "每 3 秒自动同步",
@@ -77,8 +85,17 @@ const I18N = {
     roleTool: "工具",
     roleInteraction: "交互",
     roleNotice: "提示",
+    expandNotice: "展开",
+    collapseNotice: "收起",
     interactionRequired: "需要处理",
     interactionDesktopAction: "请在桌面 Codex 处理",
+    approvalYes: "是",
+    approvalNo: "否",
+    approvalAlways: "一直是",
+    approvalSending: "正在提交审批...",
+    approvalDone: "审批已提交",
+    approvalFailed: "审批提交失败：{message}",
+    desktopMayNeedAttention: "可能需要桌面处理",
     showUsage: "显示套餐用量",
     send: "发送",
     stop: "停止",
@@ -144,6 +161,10 @@ const I18N = {
     refresh: "Refresh",
     loading: "Loading",
     searchThreads: "Search conversations",
+    newConversation: "New chat",
+    newConversationDraft: "New chat",
+    newConversationReady: "Type a message to start a new chat.",
+    newConversationFailed: "Could not start a new chat: {message}",
     threadList: "Conversation list",
     selectThread: "Select a conversation",
     syncEvery: "Auto-syncs every 3 seconds",
@@ -152,8 +173,17 @@ const I18N = {
     roleTool: "Tool",
     roleInteraction: "Interaction",
     roleNotice: "Notice",
+    expandNotice: "Expand",
+    collapseNotice: "Collapse",
     interactionRequired: "Action required",
     interactionDesktopAction: "Handle this in Codex desktop",
+    approvalYes: "Yes",
+    approvalNo: "No",
+    approvalAlways: "Always",
+    approvalSending: "Submitting approval...",
+    approvalDone: "Approval submitted",
+    approvalFailed: "Approval failed: {message}",
+    desktopMayNeedAttention: "Desktop may need attention",
     showUsage: "Show plan usage",
     send: "Send",
     stop: "Stop",
@@ -221,6 +251,7 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 2000;
 const MIN_IMAGE_EDGE = 16;
 const IMAGE_JPEG_QUALITY = 0.86;
+const DRAFT_THREAD_ID = "__new_thread__";
 
 function t(key, values = {}) {
   const text = I18N[state.locale][key] || I18N.en[key] || key;
@@ -246,10 +277,11 @@ function applyStaticText() {
   els.sidebarCloseButton.setAttribute("title", t("hideThreads"));
   els.sidebarCloseButton.setAttribute("aria-label", t("hideThreads"));
   els.searchInput.placeholder = t("searchThreads");
+  document.querySelector("#newThreadLabel").textContent = t("newConversation");
   els.threadList.setAttribute("aria-label", t("threadList"));
   els.threadTitle.textContent = t("selectThread");
   els.threadMeta.textContent = t("syncEvery");
-  document.querySelector(".toggle span").textContent = t("tool");
+  document.querySelector("#toolToggleLabel").textContent = t("tool");
   els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("pickThread"))}</div>`;
   els.accountToggle.setAttribute("title", t("showUsage"));
   els.accountToggle.setAttribute("aria-label", t("showUsage"));
@@ -355,6 +387,78 @@ function formatDuration(ms) {
   if (minutes <= 0) return `${seconds}s`;
   if (seconds === 0) return `${minutes}m`;
   return `${minutes}m${seconds}s`;
+}
+
+function renderApprovalActions(message) {
+  if (message.role !== "interaction" || !message.canApprove || !message.requestId) return "";
+  const submission = state.approvalSubmissions[approvalSubmissionKey(state.selectedId, message.requestId)];
+  if (submission?.status === "submitted") {
+    return `<div class="approval-result">${escapeHtml(t("approvalDone"))}</div>`;
+  }
+  if (submission?.status === "submitting") {
+    return `<div class="approval-result pending">${escapeHtml(t("approvalSending"))}</div>`;
+  }
+  const requestId = escapeHtml(String(message.requestId));
+  const approvalKind = escapeHtml(String(message.approvalKind || "command"));
+  const buttons = [
+    ["accept", "approvalYes", "primary"],
+    ["decline", "approvalNo", "secondary"],
+    ["acceptForSession", "approvalAlways", "primary"]
+  ];
+  return `
+    <div class="approval-actions" data-request-id="${requestId}" data-approval-kind="${approvalKind}">
+      ${buttons
+        .map(
+          ([decision, labelKey, tone]) =>
+            `<button class="approval-action ${tone}" type="button" data-decision="${escapeHtml(decision)}">${escapeHtml(t(labelKey))}</button>`
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function approvalSubmissionKey(threadId, requestId) {
+  return `${threadId || ""}:${requestId || ""}`;
+}
+
+function isImportantNotice(message) {
+  if (message.role !== "notice") return false;
+  const kind = String(message.kind || "").toLowerCase();
+  const title = String(message.title || "").toLowerCase();
+  const content = String(message.content || "").toLowerCase();
+  if (kind === "info" || title === "notice") return false;
+  if (title.includes("approval dismissed") || content.includes("rejected by user")) return false;
+  if (kind === "error") return true;
+  const text = [title, content].filter(Boolean).join(" ");
+  return (
+    text.includes("limit") ||
+    text.includes("quota") ||
+    text.includes("usage_limit") ||
+    text.includes("usage limit") ||
+    text.includes("rate_limit") ||
+    text.includes("rate limit") ||
+    text.includes("plan_limit") ||
+    text.includes("plan limit")
+  );
+}
+
+function noticeCollapseKey(message) {
+  return String(message.lineNumber || message.id || `${message.timestamp || ""}:${message.title || ""}:${message.content || ""}`);
+}
+
+function renderNoticeTitle(message, collapsed, noticeKey) {
+  return `
+    <div class="notice-title-row">
+      <div class="notice-title">${escapeHtml(message.title || t("roleNotice"))}</div>
+      ${
+        isImportantNotice(message)
+          ? ""
+          : `<button class="notice-collapse-button" type="button" data-notice-key="${escapeHtml(noticeKey)}">${escapeHtml(
+              collapsed ? t("expandNotice") : t("collapseNotice")
+            )}</button>`
+      }
+    </div>
+  `;
 }
 
 function formatResetTime(ms) {
@@ -534,8 +638,9 @@ async function addImageFiles(files) {
 
 function visibleThreads() {
   const query = state.filter.trim().toLowerCase();
-  if (!query) return state.threads;
-  return state.threads.filter((thread) => {
+  const threads = state.draftThread ? [state.draftThread, ...state.threads] : state.threads;
+  if (!query) return threads;
+  return threads.filter((thread) => {
     return `${thread.title || ""} ${thread.preview || ""} ${thread.cwd || ""}`.toLowerCase().includes(query);
   });
 }
@@ -548,7 +653,7 @@ function renderThreads() {
       const active = thread.id === state.selectedId ? " active" : "";
       const title = escapeHtml(thread.title || t("untitled"));
       return `
-        <button class="thread-item${active}" data-id="${thread.id}">
+        <button class="thread-item${active}${thread.id === DRAFT_THREAD_ID ? " draft" : ""}" data-id="${thread.id}">
           <span class="thread-title">${title}</span>
         </button>
       `;
@@ -691,7 +796,7 @@ function mergePendingMessages(data) {
 function renderCurrentMessages(scrollToBottom = true) {
   const data =
     state.lastMessagesData || {
-      thread: state.threads.find((thread) => thread.id === state.selectedId) || null,
+      thread: state.selectedId === DRAFT_THREAD_ID ? state.draftThread : state.threads.find((thread) => thread.id === state.selectedId) || null,
       messages: [],
       status: state.threadStatus || { thinking: false }
     };
@@ -727,18 +832,20 @@ function removePendingMessage(id) {
 }
 
 function renderMessages(data) {
-  const selected = state.threads.find((thread) => thread.id === state.selectedId);
+  const selected = state.selectedId === DRAFT_THREAD_ID ? state.draftThread : state.threads.find((thread) => thread.id === state.selectedId);
   els.threadTitle.textContent = selected?.title || data.thread?.title || t("untitled");
   const displayMessages = mergePendingMessages(data);
   const statusText = data.status?.interactionRequired
     ? `${t("separator")}${t("interactionRequired")}`
-    : data.status?.thinking
-      ? `${t("separator")}${t("thinking")}`
-      : "";
+    : data.status?.possibleDesktopAttention
+      ? `${t("separator")}${t("desktopMayNeedAttention")}`
+      : data.status?.thinking
+        ? `${t("separator")}${t("thinking")}`
+        : "";
   els.threadMeta.textContent = `${t("contents", { count: displayMessages.length })}${statusText}`;
 
   if (!displayMessages.length && !data.status?.thinking) {
-    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("emptyThread"))}</div>`;
+    els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(state.selectedId === DRAFT_THREAD_ID ? t("newConversationReady") : t("emptyThread"))}</div>`;
     return;
   }
 
@@ -748,12 +855,16 @@ function renderMessages(data) {
       const isTool = message.role === "tool";
       const isInteraction = message.role === "interaction";
       const isNotice = message.role === "notice";
+      const noticeKey = isNotice ? noticeCollapseKey(message) : "";
+      const noticeCollapsed = isNotice && !isImportantNotice(message) && !state.expandedNotices[noticeKey];
       const hidden = isTool && !state.showTools ? " hidden" : "";
       const title =
-        isTool || isInteraction || isNotice
-          ? `<div class="${isInteraction ? "interaction-title" : isNotice ? "notice-title" : "tool-title"}">${escapeHtml(
-              isInteraction ? t("interactionDesktopAction") : isNotice ? message.title || t("roleNotice") : message.kind
-            )}${isTool ? `${t("separator")}${escapeHtml(message.title || "")}` : ""}</div>`
+        isNotice
+          ? renderNoticeTitle(message, noticeCollapsed, noticeKey)
+          : isTool || isInteraction
+            ? `<div class="${isInteraction ? "interaction-title" : "tool-title"}">${escapeHtml(
+                isInteraction ? t("interactionDesktopAction") : message.kind
+              )}${isTool ? `${t("separator")}${escapeHtml(message.title || "")}` : ""}</div>`
           : "";
       const metaTop = messageMetaTop(message, previousUserMessage);
       const metaBottom = formatMessageDate(message.completedAtMs || message.timestamp);
@@ -764,8 +875,9 @@ function renderMessages(data) {
           <div class="bubble">
             ${metaTop ? `<div class="message-meta message-meta-top">${escapeHtml(metaTop)}</div>` : ""}
             ${title}
-            ${message.content ? renderMarkdownLite(message.content) : ""}
-            ${renderMessageImages(message)}
+            ${message.content && !noticeCollapsed ? renderMarkdownLite(message.content) : ""}
+            ${!noticeCollapsed ? renderMessageImages(message) : ""}
+            ${renderApprovalActions(message)}
             ${metaBottom ? `<div class="message-meta message-meta-bottom">${escapeHtml(metaBottom)}</div>` : ""}
           </div>
         </article>
@@ -778,7 +890,7 @@ function renderMessages(data) {
         <div class="role">${roleBadge({ role: "assistant" })}</div>
         <div class="bubble thinking-bubble">
           <div class="message-meta message-meta-top">${escapeHtml(t("processing"))}</div>
-          <p>${escapeHtml(t("thinking").replace("...", ""))}<span class="thinking-dots" aria-hidden="true"></span></p>
+          <p>${escapeHtml((data.status?.possibleDesktopAttention ? t("desktopMayNeedAttention") : t("thinking").replace("...", "")))}<span class="thinking-dots" aria-hidden="true"></span></p>
         </div>
       </article>
     `
@@ -879,14 +991,15 @@ async function postJson(url, body) {
 function renderComposerMode() {
   const allowWrite = Boolean(state.config?.allowWrite);
   const thinking = Boolean(state.threadStatus?.thinking);
-  els.composerInput.disabled = !allowWrite || state.composerBusy;
-  els.attachButton.disabled = !allowWrite || state.composerBusy;
-  els.sendButton.disabled = !allowWrite || state.composerBusy;
+  const hasTarget = Boolean(state.selectedId);
+  els.composerInput.disabled = !allowWrite || state.composerBusy || !hasTarget;
+  els.attachButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
+  els.sendButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.sendButton.classList.toggle("stop-mode", allowWrite && thinking);
   els.sendButton.textContent = allowWrite && thinking ? "■" : t("send");
   els.sendButton.setAttribute("aria-label", allowWrite && thinking ? t("stopCurrentTask") : t("send"));
   els.sendButton.setAttribute("title", allowWrite && thinking ? t("stopCurrentTask") : t("send"));
-  els.composerInput.placeholder = allowWrite ? t("sendToCodex") : t("readonlyPlaceholder");
+  els.composerInput.placeholder = allowWrite ? (state.selectedId === DRAFT_THREAD_ID ? t("newConversationReady") : t("sendToCodex")) : t("readonlyPlaceholder");
   if (!allowWrite) els.sendStatus.textContent = t("readonly");
   else if (els.sendStatus.textContent === t("readonly")) els.sendStatus.textContent = "";
 }
@@ -915,6 +1028,17 @@ function renderTransientSyncError(error) {
 
 async function loadMessages(force = false) {
   if (!state.selectedId || state.loadingMessages) return;
+  if (state.selectedId === DRAFT_THREAD_ID) {
+    state.lastMessagesData = {
+      thread: state.draftThread,
+      messages: [],
+      status: { thinking: false }
+    };
+    state.threadStatus = state.lastMessagesData.status;
+    renderComposerMode();
+    renderMessages(state.lastMessagesData);
+    return;
+  }
   state.loadingMessages = true;
   try {
     const data = await fetchJson(`/api/threads/${state.selectedId}/messages`);
@@ -983,6 +1107,30 @@ els.threadList.addEventListener("click", (event) => {
   closeSidebarOnCompact();
 });
 
+els.newThreadButton.addEventListener("click", () => {
+  if (!state.config?.allowWrite || els.newThreadButton.disabled) return;
+  els.sendStatus.textContent = "";
+  state.draftThread = {
+    id: DRAFT_THREAD_ID,
+    title: t("newConversationDraft"),
+    preview: "",
+    cwd: ""
+  };
+  state.selectedId = DRAFT_THREAD_ID;
+  state.messagesSignature = "";
+  state.threadStatus = { thinking: false };
+  state.lastMessagesData = {
+    thread: state.draftThread,
+    messages: [],
+    status: state.threadStatus
+  };
+  renderThreads();
+  renderCurrentMessages(true);
+  renderComposerMode();
+  closeSidebarOnCompact();
+  if (shouldRefocusComposer()) els.composerInput.focus();
+});
+
 els.refreshButton.addEventListener("click", () => refresh(true));
 
 els.sidebarCloseButton.addEventListener("click", () => {
@@ -1002,6 +1150,60 @@ els.drawerOverlay.addEventListener("click", () => {
 
 els.messageList.addEventListener("pointerdown", () => {
   closeSidebarOnCompact();
+});
+
+els.messageList.addEventListener("click", async (event) => {
+  const noticeButton = event.target.closest(".notice-collapse-button");
+  if (noticeButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const key = noticeButton.dataset.noticeKey || "";
+    if (!key) return;
+    state.expandedNotices[key] = !state.expandedNotices[key];
+    renderCurrentMessages(false);
+    return;
+  }
+
+  const button = event.target.closest(".approval-action");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!state.config?.allowWrite || button.disabled) return;
+  const container = button.closest(".approval-actions");
+  const requestId = container?.dataset.requestId || "";
+  const approvalKind = container?.dataset.approvalKind || "command";
+  const decision = button.dataset.decision || "";
+  if (!requestId || !decision) return;
+  const submissionKey = approvalSubmissionKey(state.selectedId, requestId);
+  const buttons = [...container.querySelectorAll(".approval-action")];
+  buttons.forEach((item) => {
+    item.disabled = true;
+  });
+  state.approvalSubmissions[submissionKey] = { status: "submitting", decision };
+  container.outerHTML = `<div class="approval-result pending">${escapeHtml(t("approvalSending"))}</div>`;
+  try {
+    await postJson("/api/approval", {
+      threadId: state.selectedId,
+      requestId,
+      approvalKind,
+      decision
+    });
+    state.approvalSubmissions[submissionKey] = { status: "submitted", decision };
+    state.messagesSignature = "";
+    if (els.sendStatus.textContent === t("approvalSending") || els.sendStatus.textContent === t("approvalDone")) {
+      els.sendStatus.textContent = "";
+    }
+    renderCurrentMessages(false);
+    refreshSoon(700);
+  } catch (error) {
+    delete state.approvalSubmissions[submissionKey];
+    buttons.forEach((item) => {
+      item.disabled = false;
+    });
+    els.sendStatus.textContent = t("approvalFailed", { message: error.message });
+    state.messagesSignature = "";
+    refreshSoon(700);
+  }
 });
 
 window.addEventListener("resize", () => {
@@ -1107,6 +1309,7 @@ els.composerForm.addEventListener("submit", async (event) => {
   if (!state.config?.allowWrite) return;
   if (state.composerBusy) return;
   const thinking = Boolean(state.threadStatus?.thinking);
+  const isDraftThread = state.selectedId === DRAFT_THREAD_ID;
   const message = els.composerInput.value.trim();
   const images = [...state.imageAttachments];
   if (!thinking && !message && !images.length) return;
@@ -1114,7 +1317,7 @@ els.composerForm.addEventListener("submit", async (event) => {
     els.sendStatus.textContent = t("busyCannotSend");
     return;
   }
-  const pendingMessageId = thinking ? null : addPendingUserMessage(state.selectedId, message, images);
+  const pendingMessageId = thinking || isDraftThread ? null : addPendingUserMessage(state.selectedId, message, images);
   state.composerBusy = true;
   renderComposerMode();
   els.sendStatus.textContent = "";
@@ -1128,12 +1331,19 @@ els.composerForm.addEventListener("submit", async (event) => {
     } else {
       const result = await postJson("/api/send", {
         message,
-        threadId: state.selectedId,
+        threadId: isDraftThread ? null : state.selectedId,
+        newThread: isDraftThread,
         images: images.map(({ name, mimeType, data }) => ({ name, mimeType, data }))
       });
       els.composerInput.value = "";
       state.imageAttachments = [];
       renderImageAttachments();
+      if (isDraftThread && result.threadId) {
+        state.draftThread = null;
+        state.selectedId = result.threadId;
+        state.pendingMessages = state.pendingMessages.filter((pending) => pending.id !== pendingMessageId);
+        await loadThreads();
+      }
       state.threadStatus = { ...(state.threadStatus || {}), thinking: true, turnId: result.turnId || state.threadStatus?.turnId || null };
       renderComposerMode();
       refreshSoon(1200);

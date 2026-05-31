@@ -42,7 +42,13 @@
             <button id="sidebarCloseButton" class="icon-button" title="隐藏对话列表" aria-label="隐藏对话列表">‹</button>
           </div>
         </div>
-        <input id="searchInput" class="search" type="search" placeholder="搜索对话" autocomplete="off" />
+        <div class="thread-search-row">
+          <input id="searchInput" class="search" type="search" placeholder="搜索对话" autocomplete="off" />
+          <button id="newThreadButton" class="new-thread-button" type="button">
+            <span aria-hidden="true">+</span>
+            <span id="newThreadLabel">新对话</span>
+          </button>
+        </div>
         <div id="threadList" class="thread-list" aria-label="对话列表"></div>
       </aside>
 
@@ -56,7 +62,7 @@
             <button id="refreshButton" class="icon-button" type="button" title="刷新">↻</button>
             <label class="toggle">
               <input id="toolToggle" type="checkbox" />
-              <span>工具</span>
+              <span id="toolToggleLabel">工具</span>
             </label>
             <button id="lockButton" class="icon-button" type="button" title="已锁定" aria-label="已锁定">🔒</button>
           </div>

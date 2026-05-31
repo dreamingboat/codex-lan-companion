@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, promises as fs } from "node:fs";
 import http from "node:http";
@@ -84,6 +84,7 @@ const CODEX_IPC_SOCKET =
     ? String.raw`\\.\pipe\codex-ipc`
     : path.join(os.tmpdir(), "codex-ipc", typeof process.getuid === "function" ? `ipc-${process.getuid()}.sock` : "ipc.sock"));
 const STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
+const CODEX_CLI = process.env.CODEX_CLI || (existsSync("/Applications/Codex.app/Contents/Resources/codex") ? "/Applications/Codex.app/Contents/Resources/codex" : "codex");
 const SESSION_INDEX = path.join(CODEX_HOME, "session_index.jsonl");
 const AUTH_FILE = path.join(CODEX_HOME, "auth.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -97,7 +98,10 @@ const MAX_SEND_IMAGE_PIXELS = 12_000_000;
 const SUPPORTED_SEND_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const IPC_VERSION_BY_METHOD = {
   "thread-follower-start-turn": 1,
-  "thread-follower-interrupt-turn": 1
+  "thread-follower-interrupt-turn": 1,
+  "thread-follower-command-approval-decision": 1,
+  "thread-follower-file-approval-decision": 1,
+  "thread-follower-permissions-request-approval-response": 1
 };
 
 const jsonHeaders = {
@@ -110,6 +114,12 @@ const recentNotices = [];
 let codexIpcClient = null;
 let accountCache = null;
 let sqliteQueue = Promise.resolve();
+
+function rawDebugEventsLimit(value = 80) {
+  const limit = Number(value);
+  if (!Number.isFinite(limit)) return 80;
+  return Math.max(1, Math.min(300, Math.floor(limit)));
+}
 
 function sendJson(res, status, body) {
   res.writeHead(status, jsonHeaders);
@@ -322,6 +332,28 @@ class DesktopCodexIpcClient {
     if (this.events.length > 120) this.events.splice(0, this.events.length - 120);
   }
 
+  rawEvents(limit = 80) {
+    return this.events.slice(-rawDebugEventsLimit(limit)).map((event, index) => ({
+      index,
+      timestamp: event.timestamp,
+      type: event.message?.type || "",
+      method: event.message?.method || "",
+      resultType: event.message?.resultType || "",
+      requestId: event.message?.requestId || "",
+      conversationId:
+        event.message?.conversationId ||
+        event.message?.conversation_id ||
+        event.message?.threadId ||
+        event.message?.thread_id ||
+        event.message?.params?.conversationId ||
+        event.message?.params?.conversation_id ||
+        event.message?.params?.threadId ||
+        event.message?.params?.thread_id ||
+        "",
+      summary: compact(redactLargePayloads(event.message), 3000)
+    }));
+  }
+
   getRecentInteractionMessages(threadId) {
     const selectedThreadId = String(threadId || "");
     return this.events
@@ -432,11 +464,46 @@ class DesktopCodexIpcClient {
       conversationId: threadId
     });
   }
+
+  async startConversation(text, images = []) {
+    await this.ensureReady();
+    const input = [];
+    if (text) input.push({ type: "text", text, text_elements: [] });
+    for (const image of images) {
+      input.push({
+        type: "image",
+        url: `data:${image.mimeType};base64,${image.data}`
+      });
+    }
+    return this.request(
+      "start-conversation",
+      {
+        hostId: "local",
+        input,
+        attachments: [],
+        cwd: process.cwd(),
+        workspaceRoots: [process.cwd()],
+        collaborationMode: null,
+        threadSource: "user",
+        approvalsReviewer: "user"
+      },
+      { timeoutMs: 60000 }
+    );
+  }
 }
 
 function getCodexIpcClient() {
   if (!codexIpcClient) codexIpcClient = new DesktopCodexIpcClient();
   return codexIpcClient;
+}
+
+function keepIpcWarm() {
+  if (!ALLOW_WRITE) return;
+  getCodexIpcClient()
+    .ensureReady()
+    .catch(() => {
+      // The health endpoint should not fail just because Codex Desktop is closed.
+    });
 }
 
 function sqlString(value) {
@@ -555,6 +622,29 @@ async function readLatestRateLimits() {
   return null;
 }
 
+async function readSessionIndexTitleMap() {
+  if (!existsSync(SESSION_INDEX)) return new Map();
+  const content = await fs.readFile(SESSION_INDEX, "utf8");
+  const titles = new Map();
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      const id = String(row.id || "");
+      const title = String(row.thread_name || row.title || "").trim();
+      if (id && title) titles.set(id, title);
+    } catch {
+      // Ignore malformed historical index lines.
+    }
+  }
+  return titles;
+}
+
+function displayThreadTitle(row, sessionIndexTitles) {
+  const indexedTitle = sessionIndexTitles?.get(String(row.id || ""));
+  return indexedTitle || row.title || "Untitled";
+}
+
 async function getAccountInfo() {
   const now = Date.now();
   if (accountCache && now - accountCache.cachedAt < 15000) return accountCache.value;
@@ -580,6 +670,7 @@ async function getAccountInfo() {
 
 async function getThreads() {
   if (existsSync(STATE_DB)) {
+    const sessionIndexTitles = await readSessionIndexTitleMap();
     const rows = await runSqlJson(`
       SELECT id, title, rollout_path AS rolloutPath, created_at_ms AS createdAtMs,
              updated_at_ms AS updatedAtMs, archived, preview, cwd, model
@@ -589,7 +680,7 @@ async function getThreads() {
     `);
     return rows.map((row) => ({
       id: row.id,
-      title: row.title || "Untitled",
+      title: displayThreadTitle(row, sessionIndexTitles),
       rolloutPath: row.rolloutPath,
       createdAtMs: row.createdAtMs,
       updatedAtMs: row.updatedAtMs,
@@ -615,13 +706,15 @@ async function getThreads() {
 }
 
 async function findThread(id) {
+  const sessionIndexTitles = await readSessionIndexTitleMap();
   const rows = await runSqlJson(`
     SELECT id, title, rollout_path AS rolloutPath, updated_at_ms AS updatedAtMs
     FROM threads
     WHERE id = '${sqlString(id)}'
     LIMIT 1;
   `);
-  return rows[0] || null;
+  if (!rows[0]) return null;
+  return { ...rows[0], title: displayThreadTitle(rows[0], sessionIndexTitles) };
 }
 
 function resolveRolloutPath(rolloutPath) {
@@ -669,6 +762,16 @@ function compact(value, limit = 6000) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   if (text.length <= limit) return text;
   return `${text.slice(0, limit)}\n\n... truncated ${text.length - limit} chars`;
+}
+
+function parseMaybeJsonObject(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 const INTERACTION_TYPE_PATTERNS = [
@@ -720,6 +823,8 @@ function redactLargePayloads(value, depth = 0) {
 }
 
 function isInteractionPayload(payload) {
+  const toolArguments = parseMaybeJsonObject(payload?.arguments);
+  if (toolArguments?.sandbox_permissions === "require_escalated") return true;
   const text = [
     payload?.type,
     payload?.method,
@@ -736,6 +841,8 @@ function isInteractionPayload(payload) {
 }
 
 function interactionTitle(payload) {
+  const toolArguments = parseMaybeJsonObject(payload?.arguments);
+  if (toolArguments?.sandbox_permissions === "require_escalated") return "Command approval requested";
   const type = String(payload?.type || payload?.method || payload?.name || payload?.kind || "").toLowerCase();
   if (type.includes("command")) return "Command approval requested";
   if (type.includes("file")) return "File approval requested";
@@ -747,13 +854,26 @@ function interactionTitle(payload) {
   return "Codex interaction requested";
 }
 
+function approvalKindFromPayload(payload) {
+  const toolArguments = parseMaybeJsonObject(payload?.arguments);
+  const type = String(payload?.type || payload?.method || payload?.name || payload?.kind || "").toLowerCase();
+  if (toolArguments?.sandbox_permissions === "require_escalated") return "command";
+  if (type.includes("filechange") || type.includes("file_change") || type.includes("file")) return "file";
+  if (type.includes("permission")) return "permission";
+  if (type.includes("command") || type.includes("exec") || type.includes("terminal")) return "command";
+  return "";
+}
+
 function interactionContent(payload) {
-  const params = payload?.params || payload?.payload || {};
+  const toolArguments = parseMaybeJsonObject(payload?.arguments);
+  const params = payload?.params || payload?.payload || toolArguments || {};
   const request = payload?.request || params?.request || {};
   const toolCall = payload?.tool_call || params?.tool_call || params?.toolCall || {};
   const command = firstString(
     payload?.command,
     params?.command,
+    toolArguments?.cmd,
+    toolArguments?.command,
     request?.command,
     payload?.cmd,
     params?.cmd,
@@ -772,6 +892,7 @@ function interactionContent(payload) {
     request?.question,
     payload?.reason,
     params?.reason,
+    toolArguments?.justification,
     request?.reason
   );
   const choices = Array.isArray(payload?.options)
@@ -785,6 +906,7 @@ function interactionContent(payload) {
     prompt ? `Prompt: ${prompt}` : "",
     command ? `Command: ${command}` : "",
     pathValue ? `Path: ${pathValue}` : "",
+    toolArguments?.workdir ? `Workdir: ${toolArguments.workdir}` : "",
     choices.length ? `Options: ${choices.map((option) => firstString(option?.label, option?.title, option?.id, option)).filter(Boolean).join(", ")}` : ""
   ].filter(Boolean);
   if (lines.length) return lines.join("\n\n");
@@ -793,6 +915,7 @@ function interactionContent(payload) {
 
 function messageFromInteractionEvent(timestamp, payload, meta = {}) {
   if (!isInteractionPayload(payload)) return null;
+  const approvalKind = approvalKindFromPayload(payload);
   return {
     role: "interaction",
     kind: payload?.type || payload?.method || payload?.name || "interaction",
@@ -800,6 +923,8 @@ function messageFromInteractionEvent(timestamp, payload, meta = {}) {
     ...meta,
     title: interactionTitle(payload),
     requestId: payload?.request_id || payload?.requestId || payload?.id || payload?.call_id || payload?.params?.request_id || null,
+    approvalKind,
+    canApprove: Boolean(approvalKind),
     content: interactionContent(payload),
     requiresDesktopAction: true
   };
@@ -821,6 +946,8 @@ const NOTICE_TYPE_PATTERNS = [
 ];
 
 function isNoticePayload(payload) {
+  const output = String(payload?.output || "");
+  if (payload?.type === "function_call_output" && /Rejected\(|rejected by user|require_escalated/i.test(output)) return true;
   const text = [
     payload?.type,
     payload?.method,
@@ -841,6 +968,7 @@ function isNoticePayload(payload) {
 }
 
 function noticeSeverity(payload, fallback = "info") {
+  if (payload?.type === "function_call_output" && /Rejected\(|rejected by user/i.test(String(payload?.output || ""))) return "warning";
   const text = [
     fallback,
     payload?.level,
@@ -862,6 +990,7 @@ function noticeSeverity(payload, fallback = "info") {
 }
 
 function noticeTitle(payload, severity = "info") {
+  if (payload?.type === "function_call_output" && /Rejected\(|rejected by user/i.test(String(payload?.output || ""))) return "Approval dismissed";
   const text = [
     payload?.title,
     payload?.params?.title,
@@ -881,6 +1010,7 @@ function noticeTitle(payload, severity = "info") {
 }
 
 function noticeContent(payload) {
+  if (payload?.type === "function_call_output" && payload?.output) return String(payload.output);
   const params = payload?.params || payload?.payload || {};
   const content = firstString(
     payload?.message,
@@ -1104,6 +1234,7 @@ async function parseRollout(filePath) {
     message.requiresDesktopAction = Boolean(activeTurn && (!message.turnId || message.turnId === activeTurn.turnId));
   }
   const pendingInteractions = interactionMessages.filter((message) => message.requiresDesktopAction);
+  const activeTurnWaitMs = activeTurn?.startedAtMs ? Date.now() - activeTurn.startedAtMs : 0;
   const result = {
     meta,
     file: filePath,
@@ -1113,9 +1244,10 @@ async function parseRollout(filePath) {
       thinking: Boolean(activeTurn),
       turnId: activeTurn?.turnId || null,
       startedAtMs: activeTurn?.startedAtMs || null,
-      interactionRequired: pendingInteractions.length > 0
+      interactionRequired: pendingInteractions.length > 0,
+      possibleDesktopAttention: Boolean(activeTurn && pendingInteractions.length === 0 && activeTurnWaitMs > 45_000)
     },
-    messages: [...chatMessages, ...interactionMessages, ...noticeMessages, ...toolMessages].sort((a, b) => {
+    messages: [...chatMessages, ...pendingInteractions, ...noticeMessages, ...toolMessages].sort((a, b) => {
       if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
       return a.lineNumber - b.lineNumber;
     })
@@ -1126,6 +1258,7 @@ async function parseRollout(filePath) {
 }
 
 async function getMessages(id) {
+  keepIpcWarm();
   const thread = await findThread(id);
   if (!thread) {
     const err = new Error("Thread not found");
@@ -1139,7 +1272,7 @@ async function getMessages(id) {
     throw err;
   }
   const parsed = await parseRollout(rolloutPath);
-  const ipcInteractions = codexIpcClient?.getRecentInteractionMessages(id) || [];
+  const ipcInteractions = parsed.status?.thinking ? codexIpcClient?.getRecentInteractionMessages(id) || [] : [];
   const ipcNotices = codexIpcClient?.getRecentNoticeMessages(id) || [];
   const serverNotices = getRecentNoticeMessages(id);
   const liveMessages = [...ipcInteractions, ...ipcNotices, ...serverNotices];
@@ -1296,7 +1429,7 @@ function webpDimensions(bytes) {
   return null;
 }
 
-async function sendToCodex(text, threadId, images = []) {
+async function sendToCodex(text, threadId, images = [], { newThread = false } = {}) {
   if (!ALLOW_WRITE) {
     const err = new Error("Write mode is disabled. Restart with --write to send messages to Codex Desktop.");
     err.status = 403;
@@ -1314,6 +1447,27 @@ async function sendToCodex(text, threadId, images = []) {
     err.status = 400;
     throw err;
   }
+  if (newThread) {
+    if (normalizedImages.length) {
+      const err = new Error("Starting a new Codex conversation with images from the web is not supported yet. Create the conversation with text first, then send images in the new thread.");
+      err.status = 409;
+      throw err;
+    }
+    const result = await startNewCodexThreadViaAppServer(trimmed);
+    if (result.threadId) {
+      openCodexUrl(`codex://local/${encodeURIComponent(result.threadId)}`).catch(() => {});
+    }
+    return {
+      ok: true,
+      mode: "app-server",
+      threadId: result.threadId,
+      images: [],
+      turnId: result.turnId,
+      sent: true,
+      sentAt: new Date().toISOString()
+    };
+  }
+
   const targetThreadId = threadId || (await getThreads())[0]?.id;
   if (!targetThreadId) {
     const err = new Error("No target thread selected");
@@ -1360,6 +1514,88 @@ async function sendToCodex(text, threadId, images = []) {
   };
 }
 
+function conversationIdFromStartConversation(response) {
+  const result = response?.result;
+  if (typeof result === "string" && result) return result;
+  return firstString(result?.conversationId, result?.threadId, result?.id, response?.conversationId, response?.threadId, response?.id);
+}
+
+function startNewCodexThreadViaAppServer(text) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(CODEX_CLI, ["debug", "app-server", "send-message-v2", text], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CODEX_HOME
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let threadId = "";
+    let turnId = "";
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGTERM");
+      const err = new Error("Timed out starting a new Codex conversation.");
+      err.status = 504;
+      reject(err);
+    }, 45000);
+
+    const maybeResolve = () => {
+      threadId ||= firstRegexGroup(stdout, /"thread"[\s\S]*?"id"\s*:\s*"([^"]+)"/);
+      turnId ||= firstRegexGroup(stdout, /"turn"[\s\S]*?"id"\s*:\s*"([^"]+)"/);
+      if (!settled && threadId && turnId) {
+        settled = true;
+        clearTimeout(timer);
+        resolve({ threadId, turnId });
+      }
+    };
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.length > 2_000_000) stdout = stdout.slice(-1_000_000);
+      maybeResolve();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+      if (stderr.length > 200_000) stderr = stderr.slice(-100_000);
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      maybeResolve();
+      if (settled) return;
+      const detail = firstString(stderr, stdout, `codex app-server exited with code ${code}`);
+      const err = new Error(`Failed to start a new Codex conversation. ${compact(detail, 1200)}`);
+      err.status = 502;
+      reject(err);
+    });
+  });
+}
+
+function firstRegexGroup(text, regex) {
+  const match = String(text || "").match(regex);
+  return match?.[1] || "";
+}
+
+async function openCodexUrl(url) {
+  await new Promise((resolve, reject) => {
+    execFile("open", [url], (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 async function interruptCodex(threadId) {
   if (!ALLOW_WRITE) {
     const err = new Error("Write mode is disabled. Restart with --write to control Codex Desktop.");
@@ -1396,6 +1632,143 @@ async function interruptCodex(threadId) {
   };
 }
 
+function normalizeApprovalDecision(value) {
+  const text = String(value || "").trim();
+  if (["accept", "approve", "yes", "true"].includes(text)) return "accept";
+  if (["acceptForSession", "approve-for-session", "always", "session"].includes(text)) return "acceptForSession";
+  if (["decline", "deny", "no", "false"].includes(text)) return "decline";
+  const err = new Error("Unknown approval decision");
+  err.status = 400;
+  throw err;
+}
+
+function approvalKindFromMethod(method) {
+  const text = String(method || "").toLowerCase();
+  if (text.includes("file")) return "file";
+  if (text.includes("permission")) return "permission";
+  if (text.includes("command") || text.includes("execution")) return "command";
+  return "";
+}
+
+function approvalMethodForKind(kind) {
+  if (kind === "file") return "thread-follower-file-approval-decision";
+  if (kind === "permission") return "thread-follower-permissions-request-approval-response";
+  return "thread-follower-command-approval-decision";
+}
+
+function visitObjects(value, visitor, depth = 0, seen = new Set()) {
+  if (!value || typeof value !== "object" || depth > 10 || seen.has(value)) return null;
+  seen.add(value);
+  const result = visitor(value);
+  if (result) return result;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = visitObjects(item, visitor, depth + 1, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const child of Object.values(value)) {
+    const found = visitObjects(child, visitor, depth + 1, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findLiveApprovalRequest(threadId, fallbackRequestId) {
+  const selectedThreadId = String(threadId || "");
+  const fallback = String(fallbackRequestId || "");
+  const events = codexIpcClient?.events || [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    const messageThreadId =
+      event.message?.conversationId ||
+      event.message?.conversation_id ||
+      event.message?.threadId ||
+      event.message?.thread_id ||
+      event.message?.params?.conversationId ||
+      event.message?.params?.conversation_id ||
+      event.message?.params?.threadId ||
+      event.message?.params?.thread_id ||
+      "";
+    if (messageThreadId && selectedThreadId && String(messageThreadId) !== selectedThreadId) continue;
+    const found = visitObjects(event.message, (object) => {
+      const method = object.method || object.type || object.name;
+      const methodText = String(method || "");
+      const toolArguments = parseMaybeJsonObject(object.arguments);
+      const isApproval =
+        methodText.includes("requestApproval") ||
+        /approval|permission/i.test(methodText) ||
+        object.sandbox_permissions === "require_escalated" ||
+        object.sandboxPermissions === "require_escalated" ||
+        toolArguments?.sandbox_permissions === "require_escalated";
+      if (!isApproval) return null;
+      const id = object.id || object.requestId || object.request_id || object.call_id || object.callId;
+      if (!id) return null;
+      if (fallback && id === fallback) return { requestId: id, kind: approvalKindFromMethod(methodText), method: methodText };
+      const kind = approvalKindFromMethod(methodText);
+      if (kind) return { requestId: id, kind, method: methodText };
+      return null;
+    });
+    if (found) return found;
+  }
+  return null;
+}
+
+async function respondToApproval({ threadId, requestId, decision, approvalKind } = {}) {
+  if (!ALLOW_WRITE) {
+    const err = new Error("Write mode is disabled. Restart with --write to control Codex Desktop.");
+    err.status = 403;
+    throw err;
+  }
+  const targetThreadId = threadId || (await getThreads())[0]?.id;
+  if (!targetThreadId) {
+    const err = new Error("No target thread selected");
+    err.status = 400;
+    throw err;
+  }
+  if (!(await findThread(targetThreadId))) {
+    const err = new Error("Thread not found");
+    err.status = 404;
+    throw err;
+  }
+  const normalizedDecision = normalizeApprovalDecision(decision);
+  const liveRequest = findLiveApprovalRequest(targetThreadId, requestId);
+  const resolvedRequestId = liveRequest?.requestId || String(requestId || "");
+  const resolvedKind = liveRequest?.kind || String(approvalKind || "command");
+  if (!resolvedRequestId) {
+    const err = new Error("No approval request id found");
+    err.status = 400;
+    throw err;
+  }
+
+  const method = approvalMethodForKind(resolvedKind);
+  const params =
+    resolvedKind === "permission"
+      ? { conversationId: targetThreadId, requestId: resolvedRequestId, response: normalizedDecision }
+      : { conversationId: targetThreadId, requestId: resolvedRequestId, decision: normalizedDecision };
+  try {
+    await getCodexIpcClient().request(method, params);
+  } catch (error) {
+    recordNotice(targetThreadId, {
+      severity: "error",
+      title: "Approval failed",
+      content: error.message || "Codex Desktop rejected the approval decision.",
+      source: "approval"
+    });
+    throw error;
+  }
+  return {
+    ok: true,
+    mode: "desktop-ipc",
+    threadId: targetThreadId,
+    requestId: resolvedRequestId,
+    decision: normalizedDecision,
+    approvalKind: resolvedKind,
+    decidedAt: new Date().toISOString()
+  };
+}
+
 async function serveStatic(res, pathname) {
   const requested = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, requested));
@@ -1428,6 +1801,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && url.pathname === "/api/health") {
       if (!requireAuthorized(req, res, url)) return;
+      keepIpcWarm();
       sendJson(res, 200, {
         ok: true,
         codexHome: CODEX_HOME,
@@ -1439,16 +1813,44 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/debug/events") {
+      if (!requireAuthorized(req, res, url)) return;
+      keepIpcWarm();
+      sendJson(res, 200, {
+        ok: true,
+        ipcConnected: Boolean(codexIpcClient?.socket?.writable),
+        clientId: codexIpcClient?.clientId || null,
+        eventCount: codexIpcClient?.events?.length || 0,
+        events: codexIpcClient?.rawEvents(url.searchParams.get("limit")) || []
+      });
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/api/send") {
       if (!requireAuthorized(req, res, url)) return;
       const body = await readJsonBody(req, MAX_SEND_BODY_BYTES);
-      sendJson(res, 200, await sendToCodex(body.message, body.threadId, body.images));
+      sendJson(res, 200, await sendToCodex(body.message, body.threadId, body.images, { newThread: Boolean(body.newThread) }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/new-thread") {
+      if (!requireAuthorized(req, res, url)) return;
+      sendJson(res, 200, {
+        ok: true,
+        mode: "local-draft",
+        draft: true,
+        createdAt: new Date().toISOString()
+      });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/interrupt") {
       if (!requireAuthorized(req, res, url)) return;
       const body = await readJsonBody(req);
       sendJson(res, 200, await interruptCodex(body.threadId));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/approval") {
+      if (!requireAuthorized(req, res, url)) return;
+      const body = await readJsonBody(req);
+      sendJson(res, 200, await respondToApproval(body));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/account") {
