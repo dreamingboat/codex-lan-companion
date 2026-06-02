@@ -254,9 +254,17 @@ h2 {
   border-color: #d8dde3;
   background: #f7f8fa;
   color: #69727d;
-  font-size: 20px;
-  font-weight: 800;
   opacity: 0.9;
+}
+
+.refresh-button svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.1;
 }
 
 .refresh-button:hover {

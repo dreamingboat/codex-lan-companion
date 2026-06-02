@@ -60,7 +60,12 @@
               <input id="toolToggle" type="checkbox" />
               <span id="toolToggleLabel" aria-hidden="true">🔧</span>
             </label>
-            <button id="refreshButton" class="icon-button refresh-button" type="button" title="刷新" aria-label="刷新">↻</button>
+            <button id="refreshButton" class="icon-button refresh-button" type="button" title="刷新" aria-label="刷新">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4"></path>
+                <path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"></path>
+              </svg>
+            </button>
             <button id="lockButton" class="icon-button" type="button" title="已锁定" aria-label="已锁定">🔒</button>
           </div>
         </header>
