@@ -597,8 +597,9 @@ class DesktopCodexIpcClient {
 
   getRecentInteractionMessages(threadId) {
     const selectedThreadId = String(threadId || "");
-    return this.events
-      .map((event, index) => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    return this.events.flatMap((event, index) => {
+        if (Date.parse(event.timestamp) < cutoff) return [];
         const payload = event.message?.payload || event.message?.params || event.message;
         const messageThreadId =
           event.message?.conversationId ||
@@ -610,19 +611,25 @@ class DesktopCodexIpcClient {
           event.message?.params?.threadId ||
           event.message?.params?.thread_id ||
           "";
-        if (messageThreadId && String(messageThreadId) !== selectedThreadId) return null;
-        const interaction = messageFromInteractionEvent(event.timestamp, payload, {
+        if (messageThreadId && String(messageThreadId) !== selectedThreadId) return [];
+        const meta = {
           source: "desktop-ipc",
           turnId: event.message?.turnId || event.message?.params?.turnId || null
-        });
-        if (!hasDisplayableMessageContent(interaction)) return null;
-        return {
-          ...interaction,
-          lineNumber: 1000000 + index,
-          requiresDesktopAction: true
         };
+        const payloads = interactionPayloadsFromIpcMessage(event.message);
+        if (!payloads.length && isInteractionPayload(payload)) payloads.push(payload);
+        return payloads
+          .map((interactionPayload, payloadIndex) => {
+            const interaction = messageFromInteractionEvent(event.timestamp, interactionPayload, meta);
+            if (!hasDisplayableMessageContent(interaction)) return null;
+            return {
+              ...interaction,
+              lineNumber: 1000000 + index * 20 + payloadIndex,
+              requiresDesktopAction: true
+            };
+          })
+          .filter(Boolean);
       })
-      .filter(Boolean);
   }
 
   getRecentNoticeMessages(threadId) {
@@ -1165,7 +1172,16 @@ function redactLargePayloads(value, depth = 0) {
 
 function isInteractionPayload(payload) {
   const toolArguments = parseMaybeJsonObject(payload?.arguments);
-  if (toolArguments?.sandbox_permissions === "require_escalated") return true;
+  const params = payload?.params || payload?.payload || {};
+  if (
+    toolArguments?.sandbox_permissions === "require_escalated" ||
+    params?.sandbox_permissions === "require_escalated" ||
+    params?.sandboxPermissions === "require_escalated" ||
+    payload?.sandbox_permissions === "require_escalated" ||
+    payload?.sandboxPermissions === "require_escalated"
+  ) {
+    return true;
+  }
   const text = [
     payload?.type,
     payload?.method,
@@ -1185,7 +1201,8 @@ function interactionTitle(payload) {
   const toolArguments = parseMaybeJsonObject(payload?.arguments);
   if (toolArguments?.sandbox_permissions === "require_escalated") return "Command approval requested";
   const type = String(payload?.type || payload?.method || payload?.name || payload?.kind || "").toLowerCase();
-  if (type.includes("command")) return "Command approval requested";
+  if (type.includes("command") || type.includes("exec")) return "Command approval requested";
+  if (type.includes("apply_patch")) return "Patch approval requested";
   if (type.includes("file")) return "File approval requested";
   if (type.includes("permission")) return "Permission requested";
   if (type.includes("elicitation")) return "Additional information requested";
@@ -1197,9 +1214,18 @@ function interactionTitle(payload) {
 
 function approvalKindFromPayload(payload) {
   const toolArguments = parseMaybeJsonObject(payload?.arguments);
+  const params = payload?.params || payload?.payload || {};
   const type = String(payload?.type || payload?.method || payload?.name || payload?.kind || "").toLowerCase();
-  if (toolArguments?.sandbox_permissions === "require_escalated") return "command";
-  if (type.includes("filechange") || type.includes("file_change") || type.includes("file")) return "file";
+  if (
+    toolArguments?.sandbox_permissions === "require_escalated" ||
+    params?.sandbox_permissions === "require_escalated" ||
+    params?.sandboxPermissions === "require_escalated" ||
+    payload?.sandbox_permissions === "require_escalated" ||
+    payload?.sandboxPermissions === "require_escalated"
+  ) {
+    return "command";
+  }
+  if (type.includes("apply_patch") || type.includes("filechange") || type.includes("file_change") || type.includes("file")) return "file";
   if (type.includes("permission")) return "permission";
   if (type.includes("command") || type.includes("exec") || type.includes("terminal")) return "command";
   return "";
@@ -1218,10 +1244,23 @@ function interactionContent(payload) {
     request?.command,
     payload?.cmd,
     params?.cmd,
+    payload?.program,
+    params?.program,
+    payload?.execve,
+    params?.execve,
     toolCall?.command,
     toolCall?.name
   );
-  const pathValue = firstString(payload?.path, params?.path, request?.path, payload?.file_path, params?.file_path, request?.file_path);
+  const pathValue = firstString(
+    payload?.path,
+    params?.path,
+    request?.path,
+    payload?.file_path,
+    params?.file_path,
+    request?.file_path,
+    payload?.grant_root,
+    params?.grant_root
+  );
   const prompt = firstString(
     payload?.message,
     params?.message,
@@ -1234,9 +1273,14 @@ function interactionContent(payload) {
     payload?.reason,
     params?.reason,
     toolArguments?.justification,
+    params?.justification,
     request?.reason
   );
-  const choices = Array.isArray(payload?.options)
+  const choices = Array.isArray(payload?.available_decisions)
+    ? payload.available_decisions
+    : Array.isArray(params?.available_decisions)
+      ? params.available_decisions
+      : Array.isArray(payload?.options)
     ? payload.options
     : Array.isArray(params?.options)
       ? params.options
@@ -1247,11 +1291,70 @@ function interactionContent(payload) {
     prompt ? `Prompt: ${prompt}` : "",
     command ? `Command: ${command}` : "",
     pathValue ? `Path: ${pathValue}` : "",
-    toolArguments?.workdir ? `Workdir: ${toolArguments.workdir}` : "",
+    firstString(toolArguments?.workdir, params?.workdir, params?.cwd) ? `Workdir: ${firstString(toolArguments?.workdir, params?.workdir, params?.cwd)}` : "",
     choices.length ? `Options: ${choices.map((option) => firstString(option?.label, option?.title, option?.id, option)).filter(Boolean).join(", ")}` : ""
   ].filter(Boolean);
   if (lines.length) return lines.join("\n\n");
   return compact(redactLargePayloads(payload), 2400);
+}
+
+function interactionRequestId(payload) {
+  const params = payload?.params || payload?.payload || {};
+  const request = payload?.request || params?.request || {};
+  return (
+    payload?.request_id ||
+    payload?.requestId ||
+    payload?.approval_id ||
+    payload?.approvalId ||
+    payload?.id ||
+    payload?.call_id ||
+    payload?.callId ||
+    params?.request_id ||
+    params?.requestId ||
+    params?.approval_id ||
+    params?.approvalId ||
+    params?.id ||
+    request?.request_id ||
+    request?.requestId ||
+    request?.approval_id ||
+    request?.approvalId ||
+    request?.id ||
+    null
+  );
+}
+
+function collectInteractionPayloads(value, depth = 0, seen = new Set(), results = []) {
+  if (!value || typeof value !== "object" || depth > 12 || seen.has(value)) return results;
+  seen.add(value);
+  if (isInteractionPayload(value) && interactionRequestId(value)) results.push(value);
+  if (Array.isArray(value)) {
+    for (const item of value) collectInteractionPayloads(item, depth + 1, seen, results);
+    return results;
+  }
+  for (const child of Object.values(value)) collectInteractionPayloads(child, depth + 1, seen, results);
+  return results;
+}
+
+function interactionPayloadsFromIpcMessage(message) {
+  const payloads = collectInteractionPayloads(message);
+  const seen = new Set();
+  const unique = payloads.filter((payload) => {
+    const key = `${interactionRequestId(payload) || ""}:${payload?.method || payload?.type || payload?.name || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const bestPriority = Math.min(...unique.map(interactionPayloadPriority));
+  return unique
+    .filter((payload) => interactionPayloadPriority(payload) === bestPriority || bestPriority > 1)
+    .sort((a, b) => interactionPayloadPriority(a) - interactionPayloadPriority(b));
+}
+
+function interactionPayloadPriority(payload) {
+  const method = String(payload?.method || payload?.type || payload?.name || payload?.kind || "").toLowerCase();
+  if (method.includes("requestapproval")) return 0;
+  if (method.includes("approval") || method.includes("permission")) return 1;
+  return 2;
 }
 
 function messageFromInteractionEvent(timestamp, payload, meta = {}) {
@@ -1263,7 +1366,7 @@ function messageFromInteractionEvent(timestamp, payload, meta = {}) {
     timestamp,
     ...meta,
     title: interactionTitle(payload),
-    requestId: payload?.request_id || payload?.requestId || payload?.id || payload?.call_id || payload?.params?.request_id || null,
+    requestId: interactionRequestId(payload),
     approvalKind,
     canApprove: Boolean(approvalKind),
     content: interactionContent(payload),
@@ -1613,7 +1716,7 @@ async function getMessages(id) {
     throw err;
   }
   const parsed = await parseRollout(rolloutPath);
-  const ipcInteractions = parsed.status?.thinking ? codexIpcClient?.getRecentInteractionMessages(id) || [] : [];
+  const ipcInteractions = codexIpcClient?.getRecentInteractionMessages(id) || [];
   const ipcNotices = codexIpcClient?.getRecentNoticeMessages(id) || [];
   const serverNotices = getRecentNoticeMessages(id);
   const liveMessages = [...ipcInteractions, ...ipcNotices, ...serverNotices];
@@ -2000,11 +2103,35 @@ function normalizeApprovalDecision(value) {
   throw err;
 }
 
+function approvalDecisionCandidates(value) {
+  const normalized = normalizeApprovalDecision(value);
+  if (normalized === "accept") return ["accept", "approve"];
+  if (normalized === "acceptForSession") return ["acceptForSession", "approve_for_session", "approveForSession", "accept_for_session"];
+  if (normalized === "decline") return ["decline", "deny"];
+  return [normalized];
+}
+
+function approvalDecisionCandidatesForRequest(value, liveRequest) {
+  const normalized = normalizeApprovalDecision(value);
+  const options = Array.isArray(liveRequest?.availableDecisions) ? liveRequest.availableDecisions : [];
+  const matches = options
+    .map((option) => (typeof option === "string" ? option : firstString(option?.id, option?.value, option?.action, option?.label, option?.title)))
+    .filter(Boolean)
+    .filter((option) => {
+      try {
+        return normalizeApprovalDecision(option) === normalized;
+      } catch {
+        return false;
+      }
+    });
+  return [...new Set([...matches, ...approvalDecisionCandidates(value)])];
+}
+
 function approvalKindFromMethod(method) {
   const text = String(method || "").toLowerCase();
   if (text.includes("file")) return "file";
   if (text.includes("permission")) return "permission";
-  if (text.includes("command") || text.includes("execution")) return "command";
+  if (text.includes("command") || text.includes("execution") || text.includes("exec") || text.includes("terminal")) return "command";
   return "";
 }
 
@@ -2012,6 +2139,42 @@ function approvalMethodForKind(kind) {
   if (kind === "file") return "thread-follower-file-approval-decision";
   if (kind === "permission") return "thread-follower-permissions-request-approval-response";
   return "thread-follower-command-approval-decision";
+}
+
+function approvalMethodCandidatesForKind(kind) {
+  if (kind === "file") {
+    return [
+      { method: "thread-follower-file-approval-decision", mode: "follower" },
+      { method: "reply-with-file-change-approval-decision", mode: "direct" }
+    ];
+  }
+  if (kind === "permission") {
+    return [
+      { method: "thread-follower-permissions-request-approval-response", mode: "follower" },
+      { method: "reply-with-permissions-request-approval-response", mode: "direct" }
+    ];
+  }
+  return [
+    { method: "thread-follower-command-approval-decision", mode: "follower" },
+    { method: "reply-with-command-execution-approval-decision", mode: "direct" }
+  ];
+}
+
+function approvalAvailableDecisions(payload) {
+  const params = payload?.params || payload?.payload || {};
+  const request = payload?.request || params?.request || {};
+  return (
+    (Array.isArray(payload?.available_decisions) && payload.available_decisions) ||
+    (Array.isArray(payload?.availableDecisions) && payload.availableDecisions) ||
+    (Array.isArray(params?.available_decisions) && params.available_decisions) ||
+    (Array.isArray(params?.availableDecisions) && params.availableDecisions) ||
+    (Array.isArray(request?.available_decisions) && request.available_decisions) ||
+    (Array.isArray(request?.availableDecisions) && request.availableDecisions) ||
+    (Array.isArray(payload?.options) && payload.options) ||
+    (Array.isArray(params?.options) && params.options) ||
+    (Array.isArray(request?.options) && request.options) ||
+    []
+  );
 }
 
 function visitObjects(value, visitor, depth = 0, seen = new Set()) {
@@ -2037,6 +2200,7 @@ function findLiveApprovalRequest(threadId, fallbackRequestId) {
   const selectedThreadId = String(threadId || "");
   const fallback = String(fallbackRequestId || "");
   const events = codexIpcClient?.events || [];
+  const candidates = [];
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     const messageThreadId =
@@ -2050,27 +2214,25 @@ function findLiveApprovalRequest(threadId, fallbackRequestId) {
       event.message?.params?.thread_id ||
       "";
     if (messageThreadId && selectedThreadId && String(messageThreadId) !== selectedThreadId) continue;
-    const found = visitObjects(event.message, (object) => {
-      const method = object.method || object.type || object.name;
-      const methodText = String(method || "");
-      const toolArguments = parseMaybeJsonObject(object.arguments);
-      const isApproval =
-        methodText.includes("requestApproval") ||
-        /approval|permission/i.test(methodText) ||
-        object.sandbox_permissions === "require_escalated" ||
-        object.sandboxPermissions === "require_escalated" ||
-        toolArguments?.sandbox_permissions === "require_escalated";
-      if (!isApproval) return null;
-      const id = object.id || object.requestId || object.request_id || object.call_id || object.callId;
-      if (!id) return null;
-      if (fallback && id === fallback) return { requestId: id, kind: approvalKindFromMethod(methodText), method: methodText };
-      const kind = approvalKindFromMethod(methodText);
-      if (kind) return { requestId: id, kind, method: methodText };
-      return null;
-    });
-    if (found) return found;
+    const found = interactionPayloadsFromIpcMessage(event.message)
+      .map((object) => {
+        const methodText = String(object.method || object.type || object.name || "");
+        const id = interactionRequestId(object);
+        const kind = approvalKindFromPayload(object) || approvalKindFromMethod(methodText);
+        if (!id || !kind) return null;
+        return {
+          requestId: id,
+          kind,
+          method: methodText,
+          availableDecisions: approvalAvailableDecisions(object),
+          priority: interactionPayloadPriority(object)
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.priority - b.priority);
+    candidates.push(...found);
   }
-  return null;
+  return candidates.find((candidate) => fallback && candidate.requestId === fallback) || candidates[0] || null;
 }
 
 async function respondToApproval({ threadId, requestId, decision, approvalKind } = {}) {
@@ -2092,6 +2254,7 @@ async function respondToApproval({ threadId, requestId, decision, approvalKind }
   }
   const normalizedDecision = normalizeApprovalDecision(decision);
   const liveRequest = findLiveApprovalRequest(targetThreadId, requestId);
+  const decisionCandidates = approvalDecisionCandidatesForRequest(decision, liveRequest);
   const resolvedRequestId = liveRequest?.requestId || String(requestId || "");
   const resolvedKind = liveRequest?.kind || String(approvalKind || "command");
   if (!resolvedRequestId) {
@@ -2100,18 +2263,34 @@ async function respondToApproval({ threadId, requestId, decision, approvalKind }
     throw err;
   }
 
-  const method = approvalMethodForKind(resolvedKind);
-  const params =
-    resolvedKind === "permission"
-      ? { conversationId: targetThreadId, requestId: resolvedRequestId, response: normalizedDecision }
-      : { conversationId: targetThreadId, requestId: resolvedRequestId, decision: normalizedDecision };
+  const methodCandidates = approvalMethodCandidatesForKind(resolvedKind);
+  const paramsForDecision = (candidate, mode) => {
+    const base =
+      resolvedKind === "permission"
+        ? { conversationId: targetThreadId, requestId: resolvedRequestId, response: candidate }
+        : { conversationId: targetThreadId, requestId: resolvedRequestId, decision: candidate };
+    return mode === "follower" ? { hostId: "local", ...base } : base;
+  };
   try {
-    await getCodexIpcClient().request(method, params);
+    let lastError = null;
+    for (const { method, mode } of methodCandidates) {
+      for (const candidate of decisionCandidates) {
+        try {
+          await getCodexIpcClient().request(method, paramsForDecision(candidate, mode));
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!lastError) break;
+    }
+    if (lastError) throw lastError;
   } catch (error) {
     recordNotice(targetThreadId, {
       severity: "error",
       title: "Approval failed",
-      content: error.message || "Codex Desktop rejected the approval decision.",
+      content: `${error.message || "Codex Desktop rejected the approval decision."}\n\nMethods: ${methodCandidates.map((item) => item.method).join(", ")}\n\nRequest: ${resolvedRequestId}\n\nTried: ${decisionCandidates.join(", ")}`,
       source: "approval"
     });
     throw error;
