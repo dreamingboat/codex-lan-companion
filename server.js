@@ -70,7 +70,8 @@ if (cli.help) {
   process.exit(cli.invalid ? 1 : 0);
 }
 
-const CODEX_HOME = cli.codexHome || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+const INITIAL_CODEX_HOME = cli.codexHome || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+const CODEX_HOME_FIXED = Boolean(cli.codexHome || process.env.CODEX_LAN_FIXED_CODEX_HOME === "1");
 const HOST = cli.host || process.env.HOST || "0.0.0.0";
 const PORT = Number(cli.port || process.env.PORT || 8787);
 const AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
@@ -83,10 +84,7 @@ const CODEX_IPC_SOCKET =
   (process.platform === "win32"
     ? String.raw`\\.\pipe\codex-ipc`
     : path.join(os.tmpdir(), "codex-ipc", typeof process.getuid === "function" ? `ipc-${process.getuid()}.sock` : "ipc.sock"));
-const STATE_DB = path.join(CODEX_HOME, "state_5.sqlite");
 const CODEX_CLI = process.env.CODEX_CLI || (existsSync("/Applications/Codex.app/Contents/Resources/codex") ? "/Applications/Codex.app/Contents/Resources/codex" : "codex");
-const SESSION_INDEX = path.join(CODEX_HOME, "session_index.jsonl");
-const AUTH_FILE = path.join(CODEX_HOME, "auth.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const MAX_SEND_IMAGES = 4;
 const MAX_SEND_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -113,7 +111,18 @@ const messageCache = new Map();
 const recentNotices = [];
 let codexIpcClient = null;
 let accountCache = null;
+let threadAccountCache = null;
 let sqliteQueue = Promise.resolve();
+let codexHomeState = {
+  home: path.resolve(INITIAL_CODEX_HOME),
+  version: 1,
+  source: "startup",
+  fixed: CODEX_HOME_FIXED,
+  signature: "",
+  checkedAt: 0,
+  candidateCheckedAt: 0,
+  changedAt: new Date().toISOString()
+};
 
 function rawDebugEventsLimit(value = 80) {
   const limit = Number(value);
@@ -160,9 +169,187 @@ function isSqliteLocked(error) {
   return String(error?.message || error || "").toLowerCase().includes("database is locked");
 }
 
-function runSqlJsonAttempt(sql) {
+function codexPaths(home = codexHomeState.home) {
+  const root = path.resolve(home || INITIAL_CODEX_HOME);
+  return {
+    home: root,
+    stateDb: path.join(root, "state_5.sqlite"),
+    logsDb: path.join(root, "logs_2.sqlite"),
+    sessionIndex: path.join(root, "session_index.jsonl"),
+    authFile: path.join(root, "auth.json")
+  };
+}
+
+function clearHomeScopedCaches() {
+  accountCache = null;
+  threadAccountCache = null;
+  messageCache.clear();
+  recentNotices.splice(0, recentNotices.length);
+}
+
+function normalizeCandidateHome(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const expanded = text.startsWith("~/") ? path.join(os.homedir(), text.slice(2)) : text;
+  const normalized = path.resolve(expanded);
+  const parts = normalized.split(path.sep);
+  const codexIndex = parts.lastIndexOf(".codex");
+  if (codexIndex >= 0) return parts.slice(0, codexIndex + 1).join(path.sep) || path.sep;
+  if (["state_5.sqlite", "session_index.jsonl", "auth.json"].includes(path.basename(normalized))) return path.dirname(normalized);
+  return normalized;
+}
+
+function isLikelyCodexHome(home) {
+  if (!home || !existsSync(home)) return false;
+  const paths = codexPaths(home);
+  return existsSync(paths.stateDb) || existsSync(paths.sessionIndex) || existsSync(paths.authFile) || existsSync(path.join(paths.home, "sessions"));
+}
+
+function applyCodexHomeCandidate(candidate, source = "unknown") {
+  if (codexHomeState.fixed) return false;
+  const home = normalizeCandidateHome(candidate);
+  if (!isLikelyCodexHome(home)) return false;
+  if (home === codexHomeState.home) return false;
+  codexHomeState = {
+    ...codexHomeState,
+    home,
+    version: codexHomeState.version + 1,
+    source,
+    signature: "",
+    checkedAt: 0,
+    changedAt: new Date().toISOString()
+  };
+  clearHomeScopedCaches();
+  console.log(`Codex home changed: ${home} (${source})`);
+  return true;
+}
+
+function extractCodexHomeCandidates(value, depth = 0, seen = new Set(), keyHint = "") {
+  if (value == null || depth > 8) return [];
+  if (typeof value === "string") {
+    const hint = String(keyHint || "").toLowerCase();
+    const looksLikeHomeKey = /codex[_-]?home|codexhome|data[_-]?dir|data[_-]?directory/.test(hint);
+    const looksLikeCodexPath = value.includes(`${path.sep}.codex`) || value.includes("/.codex") || value.includes("\\.codex");
+    if (looksLikeHomeKey || looksLikeCodexPath || ["state_5.sqlite", "session_index.jsonl", "auth.json"].some((name) => value.includes(name))) {
+      return [normalizeCandidateHome(value)];
+    }
+    return [];
+  }
+  if (typeof value !== "object" || seen.has(value)) return [];
+  seen.add(value);
+  const candidates = [];
+  if (Array.isArray(value)) {
+    for (const item of value) candidates.push(...extractCodexHomeCandidates(item, depth + 1, seen, keyHint));
+    return candidates;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    candidates.push(...extractCodexHomeCandidates(child, depth + 1, seen, key));
+  }
+  return candidates;
+}
+
+function maybeUpdateCodexHomeFromMessage(message) {
+  for (const candidate of extractCodexHomeCandidates(message)) {
+    if (applyCodexHomeCandidate(candidate, "desktop-ipc")) return true;
+  }
+  return false;
+}
+
+async function fileSignature(filePath) {
+  try {
+    const stat = await fs.stat(filePath);
+    return `${filePath}:${stat.size}:${Math.round(stat.mtimeMs)}`;
+  } catch {
+    return `${filePath}:missing`;
+  }
+}
+
+async function fileMtimeMs(filePath) {
+  try {
+    return (await fs.stat(filePath)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+async function discoverCodexHomeCandidates() {
+  const candidates = new Set([
+    INITIAL_CODEX_HOME,
+    process.env.CODEX_HOME,
+    path.join(os.homedir(), ".codex"),
+    ...(process.env.CODEX_LAN_CODEX_HOME_CANDIDATES || "").split(path.delimiter)
+  ]);
+  try {
+    for (const entry of await fs.readdir(os.homedir(), { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.startsWith(".codex")) {
+        candidates.add(path.join(os.homedir(), entry.name));
+      }
+    }
+  } catch {
+    // Candidate discovery is best-effort; IPC is the preferred signal.
+  }
+  const appSupport = path.join(os.homedir(), "Library", "Application Support");
+  try {
+    for (const entry of await fs.readdir(appSupport, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.toLowerCase().includes("codex")) {
+        candidates.add(path.join(appSupport, entry.name));
+      }
+    }
+  } catch {
+    // Ignore unavailable platform-specific directories.
+  }
+  return [...candidates].map(normalizeCandidateHome).filter((candidate) => candidate && isLikelyCodexHome(candidate));
+}
+
+async function maybeDiscoverNewCodexHome(now) {
+  if (codexHomeState.fixed || now - codexHomeState.candidateCheckedAt < 10000) return false;
+  codexHomeState = { ...codexHomeState, candidateCheckedAt: now };
+  const currentAuthMtime = await fileMtimeMs(codexPaths().authFile);
+  let best = null;
+  for (const candidate of await discoverCodexHomeCandidates()) {
+    if (candidate === codexHomeState.home) continue;
+    const authMtime = await fileMtimeMs(codexPaths(candidate).authFile);
+    if (authMtime > currentAuthMtime && (!best || authMtime > best.authMtime)) {
+      best = { home: candidate, authMtime };
+    }
+  }
+  return best ? applyCodexHomeCandidate(best.home, "poll-discovery") : false;
+}
+
+async function codexHomeSignature(home = codexHomeState.home) {
+  const paths = codexPaths(home);
+  return fileSignature(paths.authFile);
+}
+
+async function refreshCodexHomeContext({ force = false, source = "poll" } = {}) {
+  maybeUpdateCodexHomeFromMessage(codexIpcClient?.events?.at(-1)?.message);
+  const now = Date.now();
+  await maybeDiscoverNewCodexHome(now);
+  if (!force && now - codexHomeState.checkedAt < 2000) return codexHomeState;
+  const signature = await codexHomeSignature();
+  if (codexHomeState.signature && signature !== codexHomeState.signature) {
+    codexHomeState = {
+      ...codexHomeState,
+      version: codexHomeState.version + 1,
+      source,
+      signature,
+      checkedAt: now,
+      changedAt: new Date().toISOString()
+    };
+    clearHomeScopedCaches();
+  } else {
+    codexHomeState = {
+      ...codexHomeState,
+      signature,
+      checkedAt: now
+    };
+  }
+  return codexHomeState;
+}
+
+function runSqlJsonAttempt(sql, dbPath = codexPaths().stateDb) {
   return new Promise((resolve, reject) => {
-    execFile("sqlite3", ["-json", "-cmd", ".timeout 5000", STATE_DB, sql], { maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile("sqlite3", ["-json", "-cmd", ".timeout 5000", dbPath, sql], { maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(stderr || error.message));
         return;
@@ -176,12 +363,12 @@ function runSqlJsonAttempt(sql) {
   });
 }
 
-function runSqlJson(sql) {
+async function runSqlJsonFromDb(dbPath, sql) {
   const work = async () => {
     let lastError;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
-        return await runSqlJsonAttempt(sql);
+        return await runSqlJsonAttempt(sql, dbPath);
       } catch (error) {
         lastError = error;
         if (!isSqliteLocked(error)) throw error;
@@ -193,6 +380,11 @@ function runSqlJson(sql) {
   const next = sqliteQueue.then(work, work);
   sqliteQueue = next.catch(() => {});
   return next;
+}
+
+async function runSqlJson(sql) {
+  const { stateDb } = codexPaths((await refreshCodexHomeContext()).home);
+  return runSqlJsonFromDb(stateDb, sql);
 }
 
 async function readJsonBody(req, limit = 128 * 1024) {
@@ -325,6 +517,7 @@ class DesktopCodexIpcClient {
 
   captureEvent(message) {
     if (!message || typeof message !== "object") return;
+    maybeUpdateCodexHomeFromMessage(message);
     this.events.push({
       timestamp: new Date().toISOString(),
       message
@@ -352,6 +545,54 @@ class DesktopCodexIpcClient {
         "",
       summary: compact(redactLargePayloads(event.message), 3000)
     }));
+  }
+
+  getRecentConversationIds(maxAgeMs = 15 * 60 * 1000) {
+    const cutoff = Date.now() - maxAgeMs;
+    const ids = new Set();
+    for (const event of this.events) {
+      if (Date.parse(event.timestamp) < cutoff) continue;
+      const id =
+        event.message?.conversationId ||
+        event.message?.conversation_id ||
+        event.message?.threadId ||
+        event.message?.thread_id ||
+        event.message?.params?.conversationId ||
+        event.message?.params?.conversation_id ||
+        event.message?.params?.threadId ||
+        event.message?.params?.thread_id ||
+        "";
+      if (id) ids.add(String(id));
+    }
+    return ids;
+  }
+
+  hasConversationEvent(threadId, sinceMs = 0) {
+    const selectedThreadId = String(threadId || "");
+    if (!selectedThreadId) return false;
+    return this.events.some((event) => {
+      if (sinceMs && Date.parse(event.timestamp) < sinceMs) return false;
+      const id =
+        event.message?.conversationId ||
+        event.message?.conversation_id ||
+        event.message?.threadId ||
+        event.message?.thread_id ||
+        event.message?.params?.conversationId ||
+        event.message?.params?.conversation_id ||
+        event.message?.params?.threadId ||
+        event.message?.params?.thread_id ||
+        "";
+      return String(id) === selectedThreadId;
+    });
+  }
+
+  async waitForConversationEvent(threadId, { sinceMs = 0, timeoutMs = 5000 } = {}) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (this.hasConversationEvent(threadId, sinceMs)) return true;
+      await sleep(150);
+    }
+    return false;
   }
 
   getRecentInteractionMessages(threadId) {
@@ -451,6 +692,7 @@ class DesktopCodexIpcClient {
     }
     return this.request("thread-follower-start-turn", {
       conversationId: threadId,
+      hostId: "local",
       turnStartParams: {
         input,
         attachments: []
@@ -535,8 +777,9 @@ function displayPlanName(plan) {
 }
 
 async function readAuthProfile() {
-  if (!existsSync(AUTH_FILE)) return {};
-  const raw = await fs.readFile(AUTH_FILE, "utf8");
+  const { authFile } = codexPaths((await refreshCodexHomeContext()).home);
+  if (!existsSync(authFile)) return {};
+  const raw = await fs.readFile(authFile, "utf8");
   const auth = JSON.parse(raw);
   const idClaims = decodeJwtPayload(auth.tokens?.id_token) || {};
   const accessClaims = decodeJwtPayload(auth.tokens?.access_token) || {};
@@ -546,8 +789,89 @@ async function readAuthProfile() {
   return {
     name: idClaims.name || accessClaims.name || "",
     email: idClaims.email || accessClaims.email || "",
+    sub: idClaims.sub || accessClaims.sub || "",
     authMode: auth.auth_mode || "",
     tokenPlan: planClaim || ""
+  };
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function extractTelemetryAccount(body) {
+  const text = String(body || "");
+  const email = text.match(/\buser\.email="([^"]+)"/)?.[1] || "";
+  const accountId = text.match(/\buser\.account_id="([^"]+)"/)?.[1] || "";
+  if (!email && !accountId) return null;
+  return {
+    email: normalizeEmail(email),
+    accountId: String(accountId || "").trim()
+  };
+}
+
+async function readThreadAccountFilter() {
+  const homeState = await refreshCodexHomeContext();
+  const profile = await readAuthProfile();
+  const currentEmail = normalizeEmail(profile.email);
+  if (!currentEmail) return null;
+
+  const { logsDb } = codexPaths(homeState.home);
+  if (!existsSync(logsDb)) return null;
+
+  const cacheKey = `${homeState.home}:${homeState.version}:${currentEmail}`;
+  const now = Date.now();
+  if (threadAccountCache?.key === cacheKey && now - threadAccountCache.cachedAt < 5000) {
+    return threadAccountCache.value;
+  }
+
+  const rows = await runSqlJsonFromDb(
+    logsDb,
+    `
+      SELECT thread_id AS threadId, feedback_log_body AS body
+      FROM logs
+      WHERE thread_id IS NOT NULL
+        AND feedback_log_body LIKE '%user.email="%'
+      ORDER BY id DESC
+      LIMIT 12000;
+    `
+  );
+  const latestByThread = new Map();
+  for (const row of rows) {
+    const threadId = String(row.threadId || "").trim();
+    if (!threadId || latestByThread.has(threadId)) continue;
+    const account = extractTelemetryAccount(row.body);
+    if (account?.email) latestByThread.set(threadId, account);
+  }
+
+  const knownEmails = new Set([...latestByThread.values()].map((account) => account.email).filter(Boolean));
+  if (!knownEmails.size) return null;
+
+  const allowedThreadIds = new Set(
+    [...latestByThread.entries()].filter(([, account]) => account.email === currentEmail).map(([threadId]) => threadId)
+  );
+  const value = {
+    currentEmail,
+    knownEmails,
+    allowedThreadIds,
+    mappedThreadIds: new Set(latestByThread.keys()),
+    active: knownEmails.has(currentEmail) || allowedThreadIds.size > 0
+  };
+  threadAccountCache = { key: cacheKey, cachedAt: now, value };
+  return value;
+}
+
+async function filterRowsForCurrentAccount(rows, idSelector = (row) => row.id) {
+  const filter = await readThreadAccountFilter();
+  if (!filter?.active) return { rows, accountFiltered: false, accountEmail: filter?.currentEmail || "" };
+  const recentDesktopIds = codexIpcClient?.getRecentConversationIds?.() || new Set();
+  return {
+    rows: rows.filter((row) => {
+      const id = String(idSelector(row) || "");
+      return filter.allowedThreadIds.has(id) || recentDesktopIds.has(id);
+    }),
+    accountFiltered: true,
+    accountEmail: filter.currentEmail
   };
 }
 
@@ -565,7 +889,7 @@ function normalizeRateLimitWindow(limit) {
 
 function normalizeRateLimits(rateLimits, updatedAt) {
   if (!rateLimits || typeof rateLimits !== "object") return null;
-  return {
+  const normalized = {
     planType: rateLimits.plan_type || "",
     primary: normalizeRateLimitWindow(rateLimits.primary),
     secondary: normalizeRateLimitWindow(rateLimits.secondary),
@@ -579,18 +903,28 @@ function normalizeRateLimits(rateLimits, updatedAt) {
         : null,
     updatedAt: updatedAt || null
   };
+  const hasUsefulUsage =
+    Boolean(normalized.planType) ||
+    Boolean(normalized.primary) ||
+    Boolean(normalized.secondary) ||
+    Boolean(normalized.credits?.hasCredits) ||
+    Boolean(normalized.credits?.unlimited);
+  return hasUsefulUsage ? normalized : null;
 }
 
 async function latestRolloutPaths(limit = 8) {
-  if (!existsSync(STATE_DB)) return [];
+  const { stateDb } = codexPaths((await refreshCodexHomeContext()).home);
+  if (!existsSync(stateDb)) return [];
   const rows = await runSqlJson(`
-    SELECT rollout_path AS rolloutPath
+    SELECT id, rollout_path AS rolloutPath
     FROM threads
     WHERE rollout_path IS NOT NULL
     ORDER BY updated_at_ms DESC, updated_at DESC
-    LIMIT ${Number(limit) || 8};
+    LIMIT 200;
   `);
-  return rows
+  const filtered = await filterRowsForCurrentAccount(rows);
+  return filtered.rows
+    .slice(0, Number(limit) || 8)
     .map((row) => {
       try {
         return resolveRolloutPath(row.rolloutPath);
@@ -623,8 +957,9 @@ async function readLatestRateLimits() {
 }
 
 async function readSessionIndexTitleMap() {
-  if (!existsSync(SESSION_INDEX)) return new Map();
-  const content = await fs.readFile(SESSION_INDEX, "utf8");
+  const { sessionIndex } = codexPaths((await refreshCodexHomeContext()).home);
+  if (!existsSync(sessionIndex)) return new Map();
+  const content = await fs.readFile(sessionIndex, "utf8");
   const titles = new Map();
   for (const line of content.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -651,7 +986,7 @@ async function getAccountInfo() {
 
   const profile = await readAuthProfile();
   const usage = await readLatestRateLimits();
-  const plan = usage?.planType || profile.tokenPlan || profile.authMode || "";
+  const plan = usage?.planType || profile.tokenPlan || "";
   const value = {
     user: {
       name: profile.name,
@@ -669,7 +1004,8 @@ async function getAccountInfo() {
 }
 
 async function getThreads() {
-  if (existsSync(STATE_DB)) {
+  const { stateDb, sessionIndex } = codexPaths((await refreshCodexHomeContext()).home);
+  if (existsSync(stateDb)) {
     const sessionIndexTitles = await readSessionIndexTitleMap();
     const rows = await runSqlJson(`
       SELECT id, title, rollout_path AS rolloutPath, created_at_ms AS createdAtMs,
@@ -678,7 +1014,8 @@ async function getThreads() {
       ORDER BY updated_at_ms DESC, updated_at DESC
       LIMIT 500;
     `);
-    return rows.map((row) => ({
+    const filtered = await filterRowsForCurrentAccount(rows);
+    return filtered.rows.map((row) => ({
       id: row.id,
       title: displayThreadTitle(row, sessionIndexTitles),
       rolloutPath: row.rolloutPath,
@@ -691,13 +1028,14 @@ async function getThreads() {
     }));
   }
 
-  const content = await fs.readFile(SESSION_INDEX, "utf8");
-  return content
+  const content = await fs.readFile(sessionIndex, "utf8");
+  const rows = content
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => JSON.parse(line))
-    .reverse()
-    .map((row) => ({
+    .reverse();
+  const filtered = await filterRowsForCurrentAccount(rows);
+  return filtered.rows.map((row) => ({
       id: row.id,
       title: row.thread_name || "Untitled",
       rolloutPath: null,
@@ -706,6 +1044,8 @@ async function getThreads() {
 }
 
 async function findThread(id) {
+  const filtered = await filterRowsForCurrentAccount([{ id }]);
+  if (filtered.accountFiltered && !filtered.rows.length) return null;
   const sessionIndexTitles = await readSessionIndexTitleMap();
   const rows = await runSqlJson(`
     SELECT id, title, rollout_path AS rolloutPath, updated_at_ms AS updatedAtMs
@@ -719,9 +1059,10 @@ async function findThread(id) {
 
 function resolveRolloutPath(rolloutPath) {
   if (!rolloutPath) return null;
-  const absolute = path.isAbsolute(rolloutPath) ? rolloutPath : path.join(CODEX_HOME, rolloutPath);
+  const { home } = codexPaths();
+  const absolute = path.isAbsolute(rolloutPath) ? rolloutPath : path.join(home, rolloutPath);
   const normalized = path.normalize(absolute);
-  if (!normalized.startsWith(path.normalize(CODEX_HOME + path.sep))) {
+  if (!normalized.startsWith(path.normalize(home + path.sep))) {
     throw new Error("Rollout path is outside CODEX_HOME");
   }
   return normalized;
@@ -1430,6 +1771,7 @@ function webpDimensions(bytes) {
 }
 
 async function sendToCodex(text, threadId, images = [], { newThread = false } = {}) {
+  await refreshCodexHomeContext({ source: "send" });
   if (!ALLOW_WRITE) {
     const err = new Error("Write mode is disabled. Restart with --write to send messages to Codex Desktop.");
     err.status = 403;
@@ -1485,24 +1827,34 @@ async function sendToCodex(text, threadId, images = [], { newThread = false } = 
     result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
   } catch (error) {
     const noticeMessage = error?.message || "Codex Desktop rejected the message.";
-    if (error.message === "no-client-found" || error.message.includes("thread-role-timeout")) {
-      const err = new Error("Codex Desktop has no open owner for this thread. Open the target conversation in Codex Desktop, then send again.");
-      err.status = 409;
+    if (isNoOpenOwnerError(error)) {
+      try {
+        const openedAt = Date.now();
+        await openCodexUrl(`codex://local/${encodeURIComponent(targetThreadId)}`);
+        await getCodexIpcClient().waitForConversationEvent(targetThreadId, { sinceMs: openedAt, timeoutMs: 6000 });
+        await sleep(500);
+        result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
+      } catch (retryError) {
+        const retryMessage = retryError?.message ? ` Last IPC error: ${retryError.message}.` : "";
+        const err = new Error(`Codex Desktop has no open owner for this thread. I tried opening the target conversation; wait for it to finish opening in Codex Desktop, then send again.${retryMessage}`);
+        err.status = 409;
+        recordNotice(targetThreadId, {
+          severity: "error",
+          title: "Send failed",
+          content: err.message,
+          source: "send"
+        });
+        throw err;
+      }
+    } else {
       recordNotice(targetThreadId, {
-        severity: "error",
-        title: "Send failed",
-        content: err.message,
+        severity: noticeSeverity(error?.ipcMessage || { type: "error", message: noticeMessage }, "error"),
+        title: noticeTitle(error?.ipcMessage || { type: "error", message: noticeMessage }, "error"),
+        content: noticeMessage,
         source: "send"
       });
-      throw err;
+      throw error;
     }
-    recordNotice(targetThreadId, {
-      severity: noticeSeverity(error?.ipcMessage || { type: "error", message: noticeMessage }, "error"),
-      title: noticeTitle(error?.ipcMessage || { type: "error", message: noticeMessage }, "error"),
-      content: noticeMessage,
-      source: "send"
-    });
-    throw error;
   }
   return {
     ok: true,
@@ -1522,11 +1874,12 @@ function conversationIdFromStartConversation(response) {
 
 function startNewCodexThreadViaAppServer(text) {
   return new Promise((resolve, reject) => {
+    const { home } = codexPaths();
     const child = spawn(CODEX_CLI, ["debug", "app-server", "send-message-v2", text], {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        CODEX_HOME
+        CODEX_HOME: home
       },
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -1596,6 +1949,11 @@ async function openCodexUrl(url) {
   });
 }
 
+function isNoOpenOwnerError(error) {
+  const message = String(error?.message || "");
+  return message === "no-client-found" || message.includes("thread-role-timeout");
+}
+
 async function interruptCodex(threadId) {
   if (!ALLOW_WRITE) {
     const err = new Error("Write mode is disabled. Restart with --write to control Codex Desktop.");
@@ -1617,7 +1975,7 @@ async function interruptCodex(threadId) {
   try {
     await getCodexIpcClient().interruptTurn(targetThreadId);
   } catch (error) {
-    if (error.message === "no-client-found" || error.message.includes("thread-role-timeout")) {
+    if (isNoOpenOwnerError(error)) {
       const err = new Error("Codex Desktop has no open owner for this thread. Open the target conversation in Codex Desktop, then try again.");
       err.status = 409;
       throw err;
@@ -1802,9 +2160,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/health") {
       if (!requireAuthorized(req, res, url)) return;
       keepIpcWarm();
+      const homeState = await refreshCodexHomeContext({ force: true, source: "health" });
       sendJson(res, 200, {
         ok: true,
-        codexHome: CODEX_HOME,
+        codexHome: homeState.home,
+        codexHomeVersion: homeState.version,
+        codexHomeSource: homeState.source,
+        codexHomeFixed: homeState.fixed,
+        codexHomeChangedAt: homeState.changedAt,
         codexIpcSocket: CODEX_IPC_SOCKET,
         authRequired: AUTH_REQUIRED,
         devAnyCode: DEV_ANY_CODE,
@@ -1816,8 +2179,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/debug/events") {
       if (!requireAuthorized(req, res, url)) return;
       keepIpcWarm();
+      const homeState = await refreshCodexHomeContext({ force: true, source: "debug" });
       sendJson(res, 200, {
         ok: true,
+        codexHome: homeState.home,
+        codexHomeVersion: homeState.version,
+        codexHomeSource: homeState.source,
         ipcConnected: Boolean(codexIpcClient?.socket?.writable),
         clientId: codexIpcClient?.clientId || null,
         eventCount: codexIpcClient?.events?.length || 0,
@@ -1855,12 +2222,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/api/account") {
       if (!requireAuthorized(req, res, url)) return;
-      sendJson(res, 200, await getAccountInfo());
+      const homeState = await refreshCodexHomeContext({ source: "account" });
+      sendJson(res, 200, { ...(await getAccountInfo()), codexHome: homeState.home, codexHomeVersion: homeState.version });
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/threads") {
       if (!requireAuthorized(req, res, url)) return;
-      sendJson(res, 200, { threads: await getThreads() });
+      const homeState = await refreshCodexHomeContext({ source: "threads" });
+      sendJson(res, 200, { threads: await getThreads(), codexHome: homeState.home, codexHomeVersion: homeState.version });
       return;
     }
     const match = url.pathname.match(/^\/api\/threads\/([0-9a-fA-F-]{20,})\/messages$/);
@@ -1896,7 +2265,7 @@ server.listen(PORT, HOST, () => {
       AUTH_REQUIRED ? (DEV_ANY_CODE ? " · dev any-code" : " · token protected") : " · auth disabled"
     }`
   );
-  console.log(`Data:   ${CODEX_HOME}`);
+  console.log(`Data:   ${codexHomeState.home}${codexHomeState.fixed ? " (fixed)" : " (dynamic)"}`);
   console.log("");
   qrcode.generate(primaryUrl, { small: true });
 });

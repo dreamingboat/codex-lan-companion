@@ -11,6 +11,8 @@ const state = {
   account: null,
   accountExpanded: false,
   config: null,
+  codexHome: "",
+  codexHomeVersion: null,
   authToken: "",
   threadStatus: null,
   composerBusy: false,
@@ -955,6 +957,7 @@ function closeAccountPanel() {
 async function loadAccount() {
   try {
     state.account = await fetchJson("/api/account");
+    applyHomeContext(state.account);
     renderAccount();
   } catch {
     state.account = null;
@@ -1006,15 +1009,40 @@ function renderComposerMode() {
 
 async function loadConfig() {
   state.config = await fetchJson("/api/health");
+  applyHomeContext(state.config);
   hideAuthGate();
   renderComposerMode();
 }
 
+function applyHomeContext(data) {
+  if (!data || data.codexHomeVersion == null) return false;
+  const version = Number(data.codexHomeVersion);
+  const changed = state.codexHomeVersion != null && Number.isFinite(version) && version !== state.codexHomeVersion;
+  state.codexHome = data.codexHome || state.codexHome;
+  state.codexHomeVersion = Number.isFinite(version) ? version : state.codexHomeVersion;
+  if (!changed) return false;
+  state.selectedId = null;
+  state.draftThread = null;
+  state.messagesSignature = "";
+  state.threadStatus = null;
+  state.pendingMessages = [];
+  state.approvalSubmissions = {};
+  state.expandedNotices = {};
+  state.lastMessagesData = null;
+  els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("loading"))}</div>`;
+  return true;
+}
+
 async function loadThreads() {
   const data = await fetchJson("/api/threads");
+  const homeChanged = applyHomeContext(data);
+  if (homeChanged) loadAccount().catch(() => {});
   state.threads = data.threads || [];
-  if (!state.selectedId && state.threads[0]) {
+  if ((homeChanged || !state.threads.some((thread) => thread.id === state.selectedId)) && state.threads[0]) {
     state.selectedId = state.threads[0].id;
+  }
+  if (!state.threads.length && state.selectedId !== DRAFT_THREAD_ID) {
+    state.selectedId = null;
   }
   renderThreads();
 }
@@ -1101,6 +1129,7 @@ els.threadList.addEventListener("click", (event) => {
   state.messagesSignature = "";
   state.threadStatus = null;
   state.lastMessagesData = null;
+  els.sendStatus.textContent = "";
   renderComposerMode();
   renderThreads();
   loadMessages(true);
