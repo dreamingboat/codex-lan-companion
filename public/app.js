@@ -351,8 +351,9 @@ function safeStorageRemove(storage, key) {
 
 function initAuthToken() {
   const url = new URL(window.location.href);
-  const token = url.searchParams.get("token");
+  const token = url.searchParams.get("login") || url.searchParams.get("token");
   if (token) {
+    url.searchParams.delete("login");
     url.searchParams.delete("token");
     window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
   }

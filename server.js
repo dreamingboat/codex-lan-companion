@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, promises as fs } from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -47,12 +47,11 @@ Usage:
 Options:
   --host <host>          Bind host. Default: 0.0.0.0
   --port <port>          Bind port. Default: 8787
-  --password <password>  Friendly access code. Default: generated per launch
+  --password <password>  Friendly access code. Default: generated 6-digit code per launch
   --token <token>        Alias for --password
   --write                Enable sending messages to Codex Desktop
   --readonly             Force read-only mode. Default
-  --no-auth              Disable access token guard
-  --dev-any-code         Test mode: accept any non-empty access code
+  --no-auth              Disable access-code guard
   --codex-home <path>    Codex data directory. Default: ~/.codex
   --ipc-socket <path>    Codex Desktop IPC socket override
   -h, --help             Show this help
@@ -76,7 +75,7 @@ const HOST = cli.host || process.env.HOST || "0.0.0.0";
 const PORT = Number(cli.port || process.env.PORT || 8787);
 const AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
 const DEV_ANY_CODE = Boolean(cli.devAnyCode || process.env.CODEX_LAN_DEV_ANY_CODE === "1");
-const ACCESS_TOKEN = cli.password || cli.token || process.env.CODEX_LAN_PASSWORD || process.env.CODEX_LAN_TOKEN || randomBytes(4).toString("hex");
+const ACCESS_TOKEN = cli.password || cli.token || process.env.CODEX_LAN_PASSWORD || process.env.CODEX_LAN_TOKEN || String(randomInt(100000, 1000000));
 const ALLOW_WRITE = cli.readonly ? false : Boolean(cli.write || process.env.CODEX_LAN_ALLOW_WRITE === "1" || process.env.CODEX_ALLOW_WRITE === "1");
 const CODEX_IPC_SOCKET =
   cli.ipcSocket ||
@@ -159,6 +158,13 @@ function requireAuthorized(req, res, url) {
   if (isAuthorized(req, url)) return true;
   sendJson(res, 401, { error: "Unauthorized", authRequired: true });
   return false;
+}
+
+function loginUrlFor(baseUrl) {
+  if (!AUTH_REQUIRED || DEV_ANY_CODE) return baseUrl;
+  const url = new URL(baseUrl);
+  url.searchParams.set("login", ACCESS_TOKEN);
+  return url.toString();
 }
 
 function sleep(ms) {
@@ -2778,6 +2784,12 @@ server.listen(PORT, HOST, () => {
     .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
     .map((entry) => `http://${entry.address}:${PORT}/`);
   const primaryUrl = lanUrls[0] || localUrl;
+  const printQr = () => {
+    console.log("");
+    if (AUTH_REQUIRED && !DEV_ANY_CODE) console.log("QR:     opens the LAN page and signs in automatically");
+    else console.log("QR:     opens the LAN page");
+    qrcode.generate(loginUrlFor(primaryUrl), { small: true });
+  };
 
   console.log("Codex LAN Companion is running");
   console.log(`Local:  ${localUrl}`);
@@ -2785,10 +2797,28 @@ server.listen(PORT, HOST, () => {
   if (AUTH_REQUIRED) console.log(`Access code: ${DEV_ANY_CODE ? "any non-empty code accepted for testing" : ACCESS_TOKEN}`);
   console.log(
     `Mode:   ${ALLOW_WRITE ? "write enabled" : "read-only"}${
-      AUTH_REQUIRED ? (DEV_ANY_CODE ? " · dev any-code" : " · token protected") : " · auth disabled"
+      AUTH_REQUIRED ? (DEV_ANY_CODE ? " · dev any-code" : " · access-code protected") : " · auth disabled"
     }`
   );
   console.log(`Data:   ${codexHomeState.home}${codexHomeState.fixed ? " (fixed)" : " (dynamic)"}`);
-  console.log("");
-  qrcode.generate(primaryUrl, { small: true });
+  if (process.stdin.isTTY) console.log("Type:   qr + Enter to print the sign-in QR code again");
+  printQr();
+
+  if (process.stdin.isTTY) {
+    const terminal = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "" });
+    terminal.on("line", (line) => {
+      const command = line.trim().toLowerCase();
+      if (command === "qr") printQr();
+      else if (command === "url") {
+        console.log(`Local:  ${localUrl}`);
+        for (const lanUrl of lanUrls) console.log(`LAN:    ${lanUrl}`);
+      } else if (command === "code" && AUTH_REQUIRED) {
+        console.log(`Access code: ${DEV_ANY_CODE ? "any non-empty code accepted for testing" : ACCESS_TOKEN}`);
+      } else if (command === "help" || command === "?") {
+        console.log("Commands: qr, url, code, help");
+      } else if (command) {
+        console.log("Unknown command. Type help for available commands.");
+      }
+    });
+  }
 });
