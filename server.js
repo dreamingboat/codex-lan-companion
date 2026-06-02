@@ -533,6 +533,7 @@ class DesktopCodexIpcClient {
     this.ready = null;
     this.clientId = null;
     this.events = [];
+    this.desktopConversationRows = new Map();
   }
 
   async ensureReady() {
@@ -643,11 +644,52 @@ class DesktopCodexIpcClient {
   captureEvent(message) {
     if (!message || typeof message !== "object") return;
     maybeUpdateCodexHomeFromMessage(message);
+    this.rememberDesktopConversation(message);
     this.events.push({
       timestamp: new Date().toISOString(),
       message
     });
     if (this.events.length > 120) this.events.splice(0, this.events.length - 120);
+  }
+
+  conversationIdFromMessage(message) {
+    return (
+      message?.conversationId ||
+      message?.conversation_id ||
+      message?.threadId ||
+      message?.thread_id ||
+      message?.params?.conversationId ||
+      message?.params?.conversation_id ||
+      message?.params?.threadId ||
+      message?.params?.thread_id ||
+      message?.params?.conversationState?.id ||
+      ""
+    );
+  }
+
+  rememberDesktopConversation(message) {
+    const id = this.conversationIdFromMessage(message);
+    if (!id) return;
+    const timestampMs = Date.now();
+    const key = String(id);
+    const existing = this.desktopConversationRows.get(key) || {};
+    const title = firstString(message?.params?.conversationState?.title, message?.params?.title, message?.title, existing.title);
+    this.desktopConversationRows.set(key, {
+      id: key,
+      title: title || existing.title || "Desktop conversation",
+      rolloutPath: null,
+      createdAtMs: existing.createdAtMs || timestampMs,
+      updatedAtMs: Math.max(existing.updatedAtMs || 0, timestampMs),
+      archived: false,
+      preview: existing.preview || "",
+      cwd: existing.cwd || "",
+      model: existing.model || "",
+      source: "desktop-ipc"
+    });
+    if (this.desktopConversationRows.size > 80) {
+      const oldest = [...this.desktopConversationRows.values()].sort((a, b) => (a.updatedAtMs || 0) - (b.updatedAtMs || 0))[0];
+      if (oldest?.id) this.desktopConversationRows.delete(oldest.id);
+    }
   }
 
   rawEvents(limit = 80) {
@@ -677,19 +719,18 @@ class DesktopCodexIpcClient {
     const ids = new Set();
     for (const event of this.events) {
       if (Date.parse(event.timestamp) < cutoff) continue;
-      const id =
-        event.message?.conversationId ||
-        event.message?.conversation_id ||
-        event.message?.threadId ||
-        event.message?.thread_id ||
-        event.message?.params?.conversationId ||
-        event.message?.params?.conversation_id ||
-        event.message?.params?.threadId ||
-        event.message?.params?.thread_id ||
-        "";
+      const id = this.conversationIdFromMessage(event.message);
       if (id) ids.add(String(id));
     }
     return ids;
+  }
+
+  getDesktopConversationIds() {
+    return new Set(this.getDesktopConversationRows().map((row) => row.id));
+  }
+
+  getDesktopConversationRows() {
+    return [...this.desktopConversationRows.values()].sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
   }
 
   getRecentConversationRows(maxAgeMs = 15 * 60 * 1000) {
@@ -698,17 +739,7 @@ class DesktopCodexIpcClient {
     for (const event of this.events) {
       const timestampMs = Date.parse(event.timestamp);
       if (timestampMs < cutoff) continue;
-      const id =
-        event.message?.conversationId ||
-        event.message?.conversation_id ||
-        event.message?.threadId ||
-        event.message?.thread_id ||
-        event.message?.params?.conversationId ||
-        event.message?.params?.conversation_id ||
-        event.message?.params?.threadId ||
-        event.message?.params?.thread_id ||
-        event.message?.params?.conversationState?.id ||
-        "";
+      const id = this.conversationIdFromMessage(event.message);
       if (!id) continue;
       const existing = rowsById.get(String(id)) || {};
       const title = firstString(
@@ -1084,15 +1115,16 @@ async function readThreadAccountFilter(threadIds = []) {
   return value;
 }
 
-async function filterRowsForCurrentAccount(rows, idSelector = (row) => row.id) {
+async function filterRowsForCurrentAccount(rows, idSelector = (row) => row.id, preserveIds = []) {
   const rowIds = rows.map((row) => idSelector(row));
   const filter = await readThreadAccountFilter(rowIds);
   if (!filter?.active) return { rows, accountFiltered: false, accountEmail: filter?.currentEmail || "" };
-  const recentDesktopIds = codexIpcClient?.getRecentConversationIds?.() || new Set();
+  const desktopVisibleIds = codexIpcClient?.getDesktopConversationIds?.() || codexIpcClient?.getRecentConversationIds?.() || new Set();
+  const preserved = new Set(preserveIds.map((id) => String(id || "").trim()).filter(Boolean));
   return {
     rows: rows.filter((row) => {
       const id = String(idSelector(row) || "");
-      return filter.allowedThreadIds.has(id) || recentDesktopIds.has(id);
+      return filter.allowedThreadIds.has(id) || desktopVisibleIds.has(id) || preserved.has(id);
     }),
     accountFiltered: true,
     accountEmail: filter.currentEmail
@@ -1227,11 +1259,11 @@ async function getAccountInfo() {
   return value;
 }
 
-async function getThreads() {
+async function getThreads({ preserveIds = [] } = {}) {
   const { stateDb, sessionIndex } = codexPaths((await refreshCodexHomeContext()).home);
   const appendRecentIpcRows = (rows) => {
     const seen = new Set(rows.map((row) => String(row.id || "")));
-    const recentRows = codexIpcClient?.getRecentConversationRows?.() || [];
+    const recentRows = codexIpcClient?.getDesktopConversationRows?.() || codexIpcClient?.getRecentConversationRows?.() || [];
     return [...rows, ...recentRows.filter((row) => !seen.has(String(row.id || "")))].sort((a, b) => {
       const updatedA = Number(a.updatedAtMs) || 0;
       const updatedB = Number(b.updatedAtMs) || 0;
@@ -1247,7 +1279,7 @@ async function getThreads() {
       ORDER BY updated_at_ms DESC, updated_at DESC
       LIMIT 500;
     `);
-    const filtered = await filterRowsForCurrentAccount(rows);
+    const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
     return appendRecentIpcRows(filtered.rows.map((row) => ({
       id: row.id,
       title: displayThreadTitle(row, sessionIndexTitles),
@@ -1267,7 +1299,7 @@ async function getThreads() {
     .filter(Boolean)
     .map((line) => JSON.parse(line))
     .reverse();
-  const filtered = await filterRowsForCurrentAccount(rows);
+  const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
   return appendRecentIpcRows(filtered.rows.map((row) => ({
       id: row.id,
       title: row.thread_name || "Untitled",
@@ -1277,8 +1309,10 @@ async function getThreads() {
 }
 
 async function findThread(id) {
-  const filtered = await filterRowsForCurrentAccount([{ id }]);
-  const recentIpcThread = codexIpcClient?.getRecentConversationRows?.().find((row) => row.id === String(id)) || null;
+  const filtered = await filterRowsForCurrentAccount([{ id }], (row) => row.id, [id]);
+  const recentIpcThread =
+    (codexIpcClient?.getDesktopConversationRows?.() || codexIpcClient?.getRecentConversationRows?.() || []).find((row) => row.id === String(id)) ||
+    null;
   if (filtered.accountFiltered && !filtered.rows.length && !recentIpcThread) return null;
   const sessionIndexTitles = await readSessionIndexTitleMap();
   const rows = await runSqlJson(`
@@ -2714,7 +2748,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/threads") {
       if (!requireAuthorized(req, res, url)) return;
       const homeState = await refreshCodexHomeContext({ source: "threads" });
-      sendJson(res, 200, { threads: await getThreads(), codexHome: homeState.home, codexHomeVersion: homeState.version });
+      sendJson(res, 200, {
+        threads: await getThreads({ preserveIds: [url.searchParams.get("selectedId")] }),
+        codexHome: homeState.home,
+        codexHomeVersion: homeState.version
+      });
       return;
     }
     const match = url.pathname.match(/^\/api\/threads\/([0-9a-fA-F-]{20,})\/messages$/);

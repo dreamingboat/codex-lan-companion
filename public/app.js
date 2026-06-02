@@ -1277,7 +1277,8 @@ function applyHomeContext(data) {
 }
 
 async function loadThreads() {
-  const data = await fetchJson("/api/threads");
+  const query = state.selectedId ? `?selectedId=${encodeURIComponent(state.selectedId)}` : "";
+  const data = await fetchJson(`/api/threads${query}`);
   const homeChanged = applyHomeContext(data);
   if (homeChanged) loadAccount().catch(() => {});
   state.threads = data.threads || [];
