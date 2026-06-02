@@ -13,6 +13,7 @@ const state = {
   config: null,
   codexHome: "",
   codexHomeVersion: null,
+  draftStartedAt: 0,
   authToken: "",
   threadStatus: null,
   composerBusy: false,
@@ -254,6 +255,16 @@ const MAX_IMAGE_EDGE = 2000;
 const MIN_IMAGE_EDGE = 16;
 const IMAGE_JPEG_QUALITY = 0.86;
 const DRAFT_THREAD_ID = "__new_thread__";
+const DRAFT_LOCK_MS = 10 * 60 * 1000;
+
+function hasActiveDraft() {
+  return state.selectedId === DRAFT_THREAD_ID && state.draftThread && Date.now() - state.draftStartedAt < DRAFT_LOCK_MS;
+}
+
+function clearDraftThread() {
+  state.draftThread = null;
+  state.draftStartedAt = 0;
+}
 
 function t(key, values = {}) {
   const text = I18N[state.locale][key] || I18N.en[key] || key;
@@ -1024,8 +1035,7 @@ function applyHomeContext(data) {
   state.codexHome = data.codexHome || state.codexHome;
   state.codexHomeVersion = Number.isFinite(version) ? version : state.codexHomeVersion;
   if (!changed) return false;
-  state.selectedId = null;
-  state.draftThread = null;
+  if (!hasActiveDraft()) clearDraftThread();
   state.messagesSignature = "";
   state.threadStatus = null;
   state.pendingMessages = [];
@@ -1041,10 +1051,11 @@ async function loadThreads() {
   const homeChanged = applyHomeContext(data);
   if (homeChanged) loadAccount().catch(() => {});
   state.threads = data.threads || [];
-  if ((homeChanged || !state.threads.some((thread) => thread.id === state.selectedId)) && state.threads[0]) {
+  const isDraftSelected = hasActiveDraft();
+  if (!isDraftSelected && (homeChanged || !state.threads.some((thread) => thread.id === state.selectedId)) && state.threads[0]) {
     state.selectedId = state.threads[0].id;
   }
-  if (!state.threads.length && state.selectedId !== DRAFT_THREAD_ID) {
+  if (!state.threads.length && !isDraftSelected) {
     state.selectedId = null;
   }
   renderThreads();
@@ -1129,6 +1140,7 @@ els.threadList.addEventListener("click", (event) => {
   const button = event.target.closest(".thread-item");
   if (!button) return;
   state.selectedId = button.dataset.id;
+  if (state.selectedId !== DRAFT_THREAD_ID) clearDraftThread();
   state.messagesSignature = "";
   state.threadStatus = null;
   state.lastMessagesData = null;
@@ -1148,6 +1160,7 @@ els.newThreadButton.addEventListener("click", () => {
     preview: "",
     cwd: ""
   };
+  state.draftStartedAt = Date.now();
   state.selectedId = DRAFT_THREAD_ID;
   state.messagesSignature = "";
   state.threadStatus = { thinking: false };
@@ -1371,7 +1384,7 @@ els.composerForm.addEventListener("submit", async (event) => {
       state.imageAttachments = [];
       renderImageAttachments();
       if (isDraftThread && result.threadId) {
-        state.draftThread = null;
+        clearDraftThread();
         state.selectedId = result.threadId;
         state.pendingMessages = state.pendingMessages.filter((pending) => pending.id !== pendingMessageId);
         await loadThreads();

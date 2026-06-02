@@ -504,6 +504,12 @@ class DesktopCodexIpcClient {
     }
     this.pending.delete(message.requestId);
     clearTimeout(pending.timer);
+    this.captureEvent({
+      ...message,
+      direction: "incoming-response",
+      method: message.method || pending.method,
+      params: pending.params
+    });
     if (message.resultType === "error") {
       const error = new Error(message.error || `${message.method || pending.method || "IPC request"} failed`);
       error.ipcMessage = message;
@@ -565,6 +571,47 @@ class DesktopCodexIpcClient {
       if (id) ids.add(String(id));
     }
     return ids;
+  }
+
+  getRecentConversationRows(maxAgeMs = 15 * 60 * 1000) {
+    const cutoff = Date.now() - maxAgeMs;
+    const rowsById = new Map();
+    for (const event of this.events) {
+      const timestampMs = Date.parse(event.timestamp);
+      if (timestampMs < cutoff) continue;
+      const id =
+        event.message?.conversationId ||
+        event.message?.conversation_id ||
+        event.message?.threadId ||
+        event.message?.thread_id ||
+        event.message?.params?.conversationId ||
+        event.message?.params?.conversation_id ||
+        event.message?.params?.threadId ||
+        event.message?.params?.thread_id ||
+        event.message?.params?.conversationState?.id ||
+        "";
+      if (!id) continue;
+      const existing = rowsById.get(String(id)) || {};
+      const title = firstString(
+        event.message?.params?.conversationState?.title,
+        event.message?.params?.title,
+        event.message?.title,
+        existing.title
+      );
+      rowsById.set(String(id), {
+        id: String(id),
+        title: title || "Desktop conversation",
+        rolloutPath: null,
+        createdAtMs: existing.createdAtMs || timestampMs,
+        updatedAtMs: Math.max(existing.updatedAtMs || 0, timestampMs),
+        archived: false,
+        preview: existing.preview || "",
+        cwd: existing.cwd || "",
+        model: existing.model || "",
+        source: "desktop-ipc"
+      });
+    }
+    return [...rowsById.values()].sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
   }
 
   hasConversationEvent(threadId, sinceMs = 0) {
@@ -675,14 +722,30 @@ class DesktopCodexIpcClient {
         method,
         params
       };
+      if (params?.hostId) {
+        message.hostId = params.hostId;
+      }
       if (includeVersion) {
         message.version = IPC_VERSION_BY_METHOD[method] ?? 0;
       }
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
+        this.captureEvent({
+          type: "response",
+          direction: "timeout",
+          requestId,
+          method,
+          params,
+          resultType: "error",
+          error: `${method} timed out`
+        });
         reject(new Error(`${method} timed out`));
       }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer, method, params });
+      this.captureEvent({
+        ...message,
+        direction: "outgoing-request"
+      });
       this.socket.write(this.encode(message));
     });
   }
@@ -712,6 +775,24 @@ class DesktopCodexIpcClient {
     return this.request("thread-follower-interrupt-turn", {
       conversationId: threadId
     });
+  }
+
+  async refreshRecentConversations(hostId = "local") {
+    await this.ensureReady();
+    return this.request("refresh-recent-conversations-for-host", { hostId }, { timeoutMs: 8000 });
+  }
+
+  async setActiveConversation(threadId, active = true, hostId = "local") {
+    await this.ensureReady();
+    return this.request(
+      "set-active-conversation",
+      {
+        hostId,
+        conversationId: threadId,
+        active
+      },
+      { timeoutMs: 8000 }
+    );
   }
 
   async startConversation(text, images = []) {
@@ -817,7 +898,7 @@ function extractTelemetryAccount(body) {
   };
 }
 
-async function readThreadAccountFilter() {
+async function readThreadAccountFilter(threadIds = []) {
   const homeState = await refreshCodexHomeContext();
   const profile = await readAuthProfile();
   const currentEmail = normalizeEmail(profile.email);
@@ -826,23 +907,39 @@ async function readThreadAccountFilter() {
   const { logsDb } = codexPaths(homeState.home);
   if (!existsSync(logsDb)) return null;
 
-  const cacheKey = `${homeState.home}:${homeState.version}:${currentEmail}`;
+  const requestedThreadIds = [...new Set(threadIds.map((id) => String(id || "").trim()).filter(Boolean))];
+  const idsKey = requestedThreadIds.length ? requestedThreadIds.slice().sort().join(",") : "global";
+  const cacheKey = `${homeState.home}:${homeState.version}:${currentEmail}:${idsKey}`;
   const now = Date.now();
   if (threadAccountCache?.key === cacheKey && now - threadAccountCache.cachedAt < 5000) {
     return threadAccountCache.value;
   }
 
-  const rows = await runSqlJsonFromDb(
-    logsDb,
+  const idList = requestedThreadIds.map((id) => `'${sqlString(id)}'`).join(",");
+  const rowsSql = requestedThreadIds.length
+    ? `
+      SELECT logs.thread_id AS threadId, logs.feedback_log_body AS body
+      FROM logs
+      JOIN (
+        SELECT thread_id, MAX(id) AS latestId
+        FROM logs
+        WHERE thread_id IN (${idList})
+          AND feedback_log_body LIKE '%user.email="%'
+        GROUP BY thread_id
+      ) latest
+        ON logs.thread_id = latest.thread_id
+       AND logs.id = latest.latestId
+      ORDER BY logs.id DESC;
     `
+    : `
       SELECT thread_id AS threadId, feedback_log_body AS body
       FROM logs
       WHERE thread_id IS NOT NULL
         AND feedback_log_body LIKE '%user.email="%'
       ORDER BY id DESC
       LIMIT 12000;
-    `
-  );
+    `;
+  const rows = await runSqlJsonFromDb(logsDb, rowsSql);
   const latestByThread = new Map();
   for (const row of rows) {
     const threadId = String(row.threadId || "").trim();
@@ -869,7 +966,8 @@ async function readThreadAccountFilter() {
 }
 
 async function filterRowsForCurrentAccount(rows, idSelector = (row) => row.id) {
-  const filter = await readThreadAccountFilter();
+  const rowIds = rows.map((row) => idSelector(row));
+  const filter = await readThreadAccountFilter(rowIds);
   if (!filter?.active) return { rows, accountFiltered: false, accountEmail: filter?.currentEmail || "" };
   const recentDesktopIds = codexIpcClient?.getRecentConversationIds?.() || new Set();
   return {
@@ -1012,6 +1110,15 @@ async function getAccountInfo() {
 
 async function getThreads() {
   const { stateDb, sessionIndex } = codexPaths((await refreshCodexHomeContext()).home);
+  const appendRecentIpcRows = (rows) => {
+    const seen = new Set(rows.map((row) => String(row.id || "")));
+    const recentRows = codexIpcClient?.getRecentConversationRows?.() || [];
+    return [...rows, ...recentRows.filter((row) => !seen.has(String(row.id || "")))].sort((a, b) => {
+      const updatedA = Number(a.updatedAtMs) || 0;
+      const updatedB = Number(b.updatedAtMs) || 0;
+      return updatedB - updatedA;
+    });
+  };
   if (existsSync(stateDb)) {
     const sessionIndexTitles = await readSessionIndexTitleMap();
     const rows = await runSqlJson(`
@@ -1022,7 +1129,7 @@ async function getThreads() {
       LIMIT 500;
     `);
     const filtered = await filterRowsForCurrentAccount(rows);
-    return filtered.rows.map((row) => ({
+    return appendRecentIpcRows(filtered.rows.map((row) => ({
       id: row.id,
       title: displayThreadTitle(row, sessionIndexTitles),
       rolloutPath: row.rolloutPath,
@@ -1032,7 +1139,7 @@ async function getThreads() {
       preview: row.preview || "",
       cwd: row.cwd || "",
       model: row.model || ""
-    }));
+    })));
   }
 
   const content = await fs.readFile(sessionIndex, "utf8");
@@ -1042,17 +1149,18 @@ async function getThreads() {
     .map((line) => JSON.parse(line))
     .reverse();
   const filtered = await filterRowsForCurrentAccount(rows);
-  return filtered.rows.map((row) => ({
+  return appendRecentIpcRows(filtered.rows.map((row) => ({
       id: row.id,
       title: row.thread_name || "Untitled",
       rolloutPath: null,
       updatedAtMs: Date.parse(row.updated_at)
-    }));
+    })));
 }
 
 async function findThread(id) {
   const filtered = await filterRowsForCurrentAccount([{ id }]);
-  if (filtered.accountFiltered && !filtered.rows.length) return null;
+  const recentIpcThread = codexIpcClient?.getRecentConversationRows?.().find((row) => row.id === String(id)) || null;
+  if (filtered.accountFiltered && !filtered.rows.length && !recentIpcThread) return null;
   const sessionIndexTitles = await readSessionIndexTitleMap();
   const rows = await runSqlJson(`
     SELECT id, title, rollout_path AS rolloutPath, updated_at_ms AS updatedAtMs
@@ -1060,7 +1168,9 @@ async function findThread(id) {
     WHERE id = '${sqlString(id)}'
     LIMIT 1;
   `);
-  if (!rows[0]) return null;
+  if (!rows[0]) {
+    return recentIpcThread;
+  }
   return { ...rows[0], title: displayThreadTitle(rows[0], sessionIndexTitles) };
 }
 
@@ -1709,17 +1819,32 @@ async function getMessages(id) {
     err.status = 404;
     throw err;
   }
-  const rolloutPath = resolveRolloutPath(thread.rolloutPath);
-  if (!rolloutPath || !existsSync(rolloutPath)) {
-    const err = new Error("Rollout file not found");
-    err.status = 404;
-    throw err;
-  }
-  const parsed = await parseRollout(rolloutPath);
   const ipcInteractions = codexIpcClient?.getRecentInteractionMessages(id) || [];
   const ipcNotices = codexIpcClient?.getRecentNoticeMessages(id) || [];
   const serverNotices = getRecentNoticeMessages(id);
   const liveMessages = [...ipcInteractions, ...ipcNotices, ...serverNotices];
+  const rolloutPath = resolveRolloutPath(thread.rolloutPath);
+  if (!rolloutPath || !existsSync(rolloutPath)) {
+    return {
+      thread,
+      meta: {},
+      file: null,
+      size: 0,
+      mtimeMs: 0,
+      status: {
+        thinking: false,
+        turnId: null,
+        startedAtMs: null,
+        interactionRequired: ipcInteractions.some((message) => message.requiresDesktopAction),
+        possibleDesktopAttention: false
+      },
+      messages: liveMessages.sort((a, b) => {
+        if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
+        return a.lineNumber - b.lineNumber;
+      })
+    };
+  }
+  const parsed = await parseRollout(rolloutPath);
   if (!liveMessages.length) return { thread, ...parsed };
   return {
     thread,
@@ -1898,16 +2023,17 @@ async function sendToCodex(text, threadId, images = [], { newThread = false } = 
       err.status = 409;
       throw err;
     }
-    const result = await startNewCodexThreadViaAppServer(trimmed);
+    const result = await startNewCodexThread(trimmed);
     if (result.threadId) {
-      openCodexUrl(`codex://local/${encodeURIComponent(result.threadId)}`).catch(() => {});
+      await notifyCodexDesktopThreadCreated(result.threadId);
     }
     return {
       ok: true,
-      mode: "app-server",
+      mode: result.source || "desktop-ipc",
       threadId: result.threadId,
       images: [],
       turnId: result.turnId,
+      fallbackReason: result.fallbackReason || null,
       sent: true,
       sentAt: new Date().toISOString()
     };
@@ -1933,7 +2059,7 @@ async function sendToCodex(text, threadId, images = [], { newThread = false } = 
     if (isNoOpenOwnerError(error)) {
       try {
         const openedAt = Date.now();
-        await openCodexUrl(`codex://local/${encodeURIComponent(targetThreadId)}`);
+        await openCodexUrl(`codex://threads/${encodeURIComponent(targetThreadId)}`);
         await getCodexIpcClient().waitForConversationEvent(targetThreadId, { sinceMs: openedAt, timeoutMs: 6000 });
         await sleep(500);
         result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
@@ -1973,6 +2099,31 @@ function conversationIdFromStartConversation(response) {
   const result = response?.result;
   if (typeof result === "string" && result) return result;
   return firstString(result?.conversationId, result?.threadId, result?.id, response?.conversationId, response?.threadId, response?.id);
+}
+
+function turnIdFromStartConversation(response) {
+  const result = response?.result;
+  return firstString(result?.turn?.id, result?.turnId, result?.turn_id, response?.turnId, response?.turn_id);
+}
+
+async function startNewCodexThread(text) {
+  try {
+    const response = await getCodexIpcClient().startConversation(text);
+    const threadId = conversationIdFromStartConversation(response);
+    if (!threadId) throw new Error(`Codex Desktop did not return a conversation id. ${compact(response, 1200)}`);
+    return {
+      threadId,
+      turnId: turnIdFromStartConversation(response),
+      source: "desktop-ipc"
+    };
+  } catch (error) {
+    const fallback = await startNewCodexThreadViaAppServer(text);
+    return {
+      ...fallback,
+      source: "app-server-fallback",
+      fallbackReason: error.message || String(error)
+    };
+  }
 }
 
 function startNewCodexThreadViaAppServer(text) {
@@ -2038,6 +2189,36 @@ function startNewCodexThreadViaAppServer(text) {
   });
 }
 
+async function notifyCodexDesktopThreadCreated(threadId) {
+  const id = String(threadId || "").trim();
+  if (!id) return;
+  const client = getCodexIpcClient();
+  const failures = [];
+  try {
+    await client.refreshRecentConversations("local");
+  } catch (error) {
+    failures.push(`refresh: ${error.message || error}`);
+  }
+  try {
+    await client.setActiveConversation(id, true, "local");
+  } catch (error) {
+    failures.push(`set active: ${error.message || error}`);
+  }
+  try {
+    await openCodexUrl(`codex://threads/${encodeURIComponent(id)}`);
+  } catch (error) {
+    failures.push(`open: ${error.message || error}`);
+  }
+  if (failures.length) {
+    recordNotice(id, {
+      severity: "warning",
+      title: "Desktop refresh delayed",
+      content: `The conversation was created, but Codex Desktop may need a moment to refresh.\n\n${failures.join("\n")}`,
+      source: "new-thread"
+    });
+  }
+}
+
 function firstRegexGroup(text, regex) {
   const match = String(text || "").match(regex);
   return match?.[1] || "";
@@ -2045,7 +2226,8 @@ function firstRegexGroup(text, regex) {
 
 async function openCodexUrl(url) {
   await new Promise((resolve, reject) => {
-    execFile("open", [url], (error) => {
+    const args = String(url || "").startsWith("codex://") ? ["-b", "com.openai.codex", url] : [url];
+    execFile("open", args, (error) => {
       if (error) reject(error);
       else resolve();
     });
