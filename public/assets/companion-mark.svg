@@ -1,5 +1,25 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Companion">
-  <rect width="64" height="64" rx="14" fill="#1f6f62"/>
-  <path d="M19 22.5 32 15l13 7.5v15L32 45l-13-7.5z" fill="none" stroke="#f7f6f2" stroke-width="4" stroke-linejoin="round"/>
-  <path d="M32 15v30M19 22.5 32 30l13-7.5" fill="none" stroke="#f7f6f2" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Codex">
+  <defs>
+    <linearGradient id="bg" x1="9" x2="55" y1="7" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#123b62"/>
+      <stop offset="1" stop-color="#06172f"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="15" x2="49" y1="18" y2="46" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#72fbf2"/>
+      <stop offset="1" stop-color="#24d7d3"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="7" x2="57" y1="4" y2="61" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f6f8fa"/>
+      <stop offset="0.48" stop-color="#b5bec7"/>
+      <stop offset="1" stop-color="#747e88"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="url(#rim)"/>
+  <rect x="5.3" y="5.3" width="53.4" height="53.4" rx="14.2" fill="#f7fafc"/>
+  <rect x="7.4" y="7.4" width="49.2" height="49.2" rx="12.2" fill="url(#bg)"/>
+  <g fill="none" stroke="url(#cyan)" stroke-linecap="round" stroke-linejoin="round" stroke-width="3.5">
+    <path d="M23.8 22.9 14.8 32l9 9.1"/>
+    <path d="M40.2 22.9 49.2 32l-9 9.1"/>
+    <path d="M35.8 17.5 28.2 46.5"/>
+  </g>
 </svg>
