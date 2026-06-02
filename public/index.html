@@ -38,9 +38,6 @@
             <h1>Codex LAN Companion</h1>
             <p id="threadCount">加载中</p>
           </div>
-          <div class="sidebar-actions">
-            <button id="sidebarCloseButton" class="icon-button" title="隐藏对话列表" aria-label="隐藏对话列表">‹</button>
-          </div>
         </div>
         <div class="thread-search-row">
           <input id="searchInput" class="search" type="search" placeholder="搜索对话" autocomplete="off" />
@@ -59,11 +56,11 @@
             <p id="threadMeta">每 3 秒自动同步</p>
           </div>
           <div class="conversation-actions">
-            <button id="refreshButton" class="icon-button" type="button" title="刷新">↻</button>
             <label class="toggle">
               <input id="toolToggle" type="checkbox" />
-              <span id="toolToggleLabel">工具</span>
+              <span id="toolToggleLabel" aria-hidden="true">🔧</span>
             </label>
+            <button id="refreshButton" class="icon-button refresh-button" type="button" title="刷新" aria-label="刷新">↻</button>
             <button id="lockButton" class="icon-button" type="button" title="已锁定" aria-label="已锁定">🔒</button>
           </div>
         </header>

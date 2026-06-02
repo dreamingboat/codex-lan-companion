@@ -276,14 +276,17 @@ function applyStaticText() {
   els.drawerOverlay.setAttribute("aria-label", t("closeThreads"));
   els.threadCount.textContent = t("loading");
   els.refreshButton.setAttribute("title", t("refresh"));
-  els.sidebarCloseButton.setAttribute("title", t("hideThreads"));
-  els.sidebarCloseButton.setAttribute("aria-label", t("hideThreads"));
+  els.refreshButton.setAttribute("aria-label", t("refresh"));
+  els.sidebarCloseButton?.setAttribute("title", t("hideThreads"));
+  els.sidebarCloseButton?.setAttribute("aria-label", t("hideThreads"));
   els.searchInput.placeholder = t("searchThreads");
   document.querySelector("#newThreadLabel").textContent = t("newConversation");
   els.threadList.setAttribute("aria-label", t("threadList"));
   els.threadTitle.textContent = t("selectThread");
   els.threadMeta.textContent = t("syncEvery");
-  document.querySelector("#toolToggleLabel").textContent = t("tool");
+  document.querySelector("#toolToggleLabel").textContent = "🔧";
+  document.querySelector(".toggle").setAttribute("title", t("tool"));
+  document.querySelector(".toggle").setAttribute("aria-label", t("tool"));
   els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("pickThread"))}</div>`;
   els.accountToggle.setAttribute("title", t("showUsage"));
   els.accountToggle.setAttribute("aria-label", t("showUsage"));
@@ -1162,7 +1165,7 @@ els.newThreadButton.addEventListener("click", () => {
 
 els.refreshButton.addEventListener("click", () => refresh(true));
 
-els.sidebarCloseButton.addEventListener("click", () => {
+els.sidebarCloseButton?.addEventListener("click", () => {
   state.sidebarCollapsed = true;
   renderSidebarState();
 });

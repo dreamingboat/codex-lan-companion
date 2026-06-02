@@ -181,7 +181,8 @@ input {
   min-height: 0;
   flex-direction: column;
   border-right: 1px solid var(--border);
-  background: #ebe9e3;
+  background: #fff;
+  font-weight: 400;
   overflow: hidden;
   transform: translateX(0);
   transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 240ms ease;
@@ -213,7 +214,7 @@ p {
 
 h1 {
   font-size: 22px;
-  font-weight: 720;
+  font-weight: 500;
 }
 
 h2 {
@@ -242,10 +243,27 @@ h2 {
   background: var(--panel);
   color: var(--text);
   cursor: pointer;
+  line-height: 1;
 }
 
 .icon-button:hover {
   border-color: #c7c1b8;
+}
+
+.refresh-button {
+  border-color: #d8dde3;
+  background: #f7f8fa;
+  color: #69727d;
+  font-size: 20px;
+  font-weight: 800;
+  opacity: 0.9;
+}
+
+.refresh-button:hover {
+  border-color: #bfc7d0;
+  background: #fff;
+  color: #4e5965;
+  opacity: 1;
 }
 
 .drawer-tab {
@@ -317,7 +335,7 @@ h2 {
   cursor: pointer;
   font: inherit;
   font-size: 14px;
-  font-weight: 750;
+  font-weight: 600;
   line-height: 1;
   padding: 0 13px;
   white-space: nowrap;
@@ -359,17 +377,19 @@ h2 {
   background: transparent;
   color: var(--text);
   cursor: pointer;
+  font: inherit;
+  font-weight: 400;
   text-align: left;
 }
 
 .thread-item:hover {
-  background: rgba(255, 255, 255, 0.55);
+  background: #f6f7f8;
 }
 
 .thread-item.active {
-  border-color: #c8d8d4;
-  background: var(--panel);
-  box-shadow: var(--shadow);
+  border-color: #dde4ec;
+  background: #f4f7fb;
+  box-shadow: none;
 }
 
 .thread-item.draft .thread-title {
@@ -382,7 +402,7 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 400;
 }
 
 .conversation {
@@ -421,13 +441,50 @@ h2 {
 
 .toggle {
   display: inline-flex;
+  width: 34px;
   align-items: center;
+  justify-content: center;
   gap: 7px;
   min-height: 34px;
-  padding: 0 2px;
-  color: var(--muted);
-  font-size: 13px;
+  border: 1px solid #d8dde3;
+  border-radius: 8px;
+  background: #f7f8fa;
+  color: #8a929c;
+  cursor: pointer;
+  font-size: 16px;
+  opacity: 0.78;
+  padding: 0;
+  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease, opacity 160ms ease;
   white-space: nowrap;
+}
+
+.toggle:hover {
+  border-color: #bfc7d0;
+  background: #fff;
+  color: #5f6873;
+  opacity: 1;
+}
+
+.toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.toggle:has(input:checked) {
+  border-color: #2c7a6f;
+  background: #2f8a7e;
+  box-shadow: 0 2px 7px rgba(47, 138, 126, 0.24);
+  color: #fff;
+  opacity: 1;
+}
+
+.toggle:has(input:checked):hover {
+  border-color: #236a60;
+  background: #28786d;
+  color: #fff;
 }
 
 .message-list {
@@ -1153,9 +1210,9 @@ h2 {
   }
 
   .toggle {
+    width: 32px;
     min-height: 32px;
-    gap: 5px;
-    font-size: 12px;
+    font-size: 15px;
   }
 
   .message-list {
