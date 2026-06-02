@@ -625,8 +625,24 @@ h2 {
 }
 
 .message.user .bubble {
+  grid-column: 1;
+  grid-row: 1;
   background: var(--user);
   border-color: #d5dff1;
+}
+
+.message.user {
+  grid-template-columns: minmax(0, 820px) 92px;
+}
+
+.message.user .role {
+  grid-column: 2;
+  grid-row: 1;
+  justify-content: flex-start;
+}
+
+.message.user .role-badge {
+  justify-content: flex-start;
 }
 
 .message.pending .bubble {
@@ -1224,13 +1240,31 @@ h2 {
     gap: 4px;
   }
 
+  .message.user {
+    grid-template-columns: 1fr;
+  }
+
   .role {
     justify-content: flex-start;
     padding-top: 0;
   }
 
+  .message.user .role,
+  .message.user .bubble {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .message.user .role {
+    justify-content: flex-end;
+  }
+
   .role-badge {
     justify-content: flex-start;
+  }
+
+  .message.user .role-badge {
+    justify-content: flex-end;
   }
 
   .role-icon-image,
