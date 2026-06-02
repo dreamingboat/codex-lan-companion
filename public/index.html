@@ -68,6 +68,7 @@
           <div class="empty-state">从左侧选择一个 Codex 对话。</div>
         </div>
         <form id="composerForm" class="composer">
+          <div id="pluginMentionTray" class="plugin-mention-tray" hidden></div>
           <textarea
             id="composerInput"
             class="composer-input"
@@ -75,6 +76,7 @@
             placeholder="发送到当前 Codex 窗口"
             autocomplete="off"
           ></textarea>
+          <div id="pluginMentionMenu" class="plugin-mention-menu" role="listbox" hidden></div>
           <input id="imageInput" type="file" accept="image/*" multiple hidden />
           <div id="attachmentTray" class="attachment-tray" hidden></div>
           <div class="composer-actions">

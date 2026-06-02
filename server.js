@@ -180,6 +180,125 @@ function codexPaths(home = codexHomeState.home) {
   };
 }
 
+async function findPluginManifests(dir, depth = 0) {
+  if (depth > 6) return [];
+  let entries = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const manifests = [];
+  for (const entry of entries) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === ".codex-plugin") {
+        const manifestPath = path.join(entryPath, "plugin.json");
+        if (existsSync(manifestPath)) manifests.push(manifestPath);
+      } else {
+        manifests.push(...(await findPluginManifests(entryPath, depth + 1)));
+      }
+    }
+  }
+  return manifests;
+}
+
+function pluginMarketplaceFromManifest(manifestPath, cacheRoot) {
+  const relative = path.relative(cacheRoot, manifestPath);
+  const [marketplace] = relative.split(path.sep);
+  return marketplace && !marketplace.startsWith("..") ? marketplace : "";
+}
+
+function compactPluginDescription(value) {
+  const firstLine = String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) return "";
+  return firstLine.length > 180 ? `${firstLine.slice(0, 177)}...` : firstLine;
+}
+
+function mimeTypeForAsset(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".svg") return "image/svg+xml";
+  if (ext === ".png") return "image/png";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+  return "";
+}
+
+async function readPluginIconDataUrl(manifest, manifestPath) {
+  const pluginInterface = manifest.interface && typeof manifest.interface === "object" ? manifest.interface : {};
+  const iconValue = String(
+    manifest.composerIcon ||
+      manifest.icon ||
+      manifest.logo ||
+      pluginInterface.composerIcon ||
+      pluginInterface.icon ||
+      pluginInterface.logo ||
+      ""
+  ).trim();
+  if (!iconValue || /^https?:\/\//i.test(iconValue) || iconValue.startsWith("data:")) return "";
+  const pluginRoot = path.dirname(path.dirname(manifestPath));
+  const iconPath = path.resolve(pluginRoot, iconValue);
+  if (!iconPath.startsWith(pluginRoot + path.sep)) return "";
+  const mimeType = mimeTypeForAsset(iconPath);
+  if (!mimeType) return "";
+  try {
+    const stat = await fs.stat(iconPath);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 200 * 1024) return "";
+    const data = await fs.readFile(iconPath);
+    return `data:${mimeType};base64,${data.toString("base64")}`;
+  } catch {
+    return "";
+  }
+}
+
+async function getPlugins() {
+  const homeState = await refreshCodexHomeContext({ source: "plugins" });
+  const cacheRoot = path.join(homeState.home, "plugins", "cache");
+  const manifests = await findPluginManifests(cacheRoot);
+  const byUri = new Map();
+  for (const manifestPath of manifests) {
+    try {
+      const raw = await fs.readFile(manifestPath, "utf8");
+      const manifest = JSON.parse(raw);
+      const name = String(manifest.name || "").trim();
+      const marketplace = pluginMarketplaceFromManifest(manifestPath, cacheRoot);
+      if (!name || !marketplace) continue;
+      const pluginInterface = manifest.interface && typeof manifest.interface === "object" ? manifest.interface : {};
+      const displayName = String(pluginInterface.displayName || manifest.displayName || manifest.display_name || manifest.title || name).trim();
+      const description = compactPluginDescription(
+        pluginInterface.shortDescription ||
+          pluginInterface.short_description ||
+          manifest.shortDescription ||
+          manifest.short_description ||
+          manifest.description ||
+          pluginInterface.longDescription ||
+          ""
+      );
+      const uri = `plugin://${name}@${marketplace}`;
+      const iconDataUrl = await readPluginIconDataUrl(manifest, manifestPath);
+      byUri.set(uri, {
+        name,
+        displayName,
+        description,
+        marketplace,
+        uri,
+        iconDataUrl
+      });
+    } catch {
+      // Ignore stale or partially installed plugin cache entries.
+    }
+  }
+  const plugins = [...byUri.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" }));
+  return {
+    plugins,
+    codexHome: homeState.home,
+    codexHomeVersion: homeState.version
+  };
+}
+
 function clearHomeScopedCaches() {
   accountCache = null;
   threadAccountCache = null;
@@ -2585,6 +2704,11 @@ const server = http.createServer(async (req, res) => {
       if (!requireAuthorized(req, res, url)) return;
       const homeState = await refreshCodexHomeContext({ source: "account" });
       sendJson(res, 200, { ...(await getAccountInfo()), codexHome: homeState.home, codexHomeVersion: homeState.version });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/plugins") {
+      if (!requireAuthorized(req, res, url)) return;
+      sendJson(res, 200, await getPlugins());
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/threads") {

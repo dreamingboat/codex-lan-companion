@@ -20,7 +20,15 @@ const state = {
   imageAttachments: [],
   pendingMessages: [],
   approvalSubmissions: {},
-  lastMessagesData: null
+  lastMessagesData: null,
+  plugins: [],
+  pluginsLoaded: false,
+  pluginsLoading: false,
+  pluginMenuOpen: false,
+  pluginQuery: "",
+  pluginTriggerStart: -1,
+  pluginActiveIndex: 0,
+  selectedPlugins: []
 };
 
 const els = {
@@ -40,6 +48,8 @@ const els = {
   lockButton: document.querySelector("#lockButton"),
   composerForm: document.querySelector("#composerForm"),
   composerInput: document.querySelector("#composerInput"),
+  pluginMentionTray: document.querySelector("#pluginMentionTray"),
+  pluginMentionMenu: document.querySelector("#pluginMentionMenu"),
   imageInput: document.querySelector("#imageInput"),
   attachmentTray: document.querySelector("#attachmentTray"),
   attachButton: document.querySelector("#attachButton"),
@@ -145,6 +155,9 @@ const I18N = {
     sendFailed: "发送失败：{message}",
     interruptFailed: "停止失败：{message}",
     busyCannotSend: "Codex 正在处理。请先停止当前任务，再发送这条消息。",
+    pluginPickerTitle: "引用插件",
+    pluginPickerLoading: "正在加载插件...",
+    pluginPickerEmpty: "没有找到匹配插件",
     untitled: "Untitled",
     separator: " · "
   },
@@ -233,6 +246,9 @@ const I18N = {
     sendFailed: "Send failed: {message}",
     interruptFailed: "Stop failed: {message}",
     busyCannotSend: "Codex is still processing. Stop the current task before sending this message.",
+    pluginPickerTitle: "Mention plugin",
+    pluginPickerLoading: "Loading plugins...",
+    pluginPickerEmpty: "No matching plugins",
     untitled: "Untitled",
     separator: " · "
   }
@@ -502,9 +518,41 @@ function escapeHtml(text) {
     .replaceAll("'", "&#039;");
 }
 
+function pluginDisplayNameFromUri(uri) {
+  const name = String(uri || "")
+    .replace(/^plugin:\/\//, "")
+    .split("@")[0]
+    .trim();
+  if (!name) return "Plugin";
+  const plugin = state.plugins.find((item) => item.uri === uri || item.name === name);
+  return plugin?.displayName || name;
+}
+
+function pluginIconHtml(plugin, className = "plugin-chip-icon") {
+  if (plugin?.iconDataUrl) {
+    return `<img class="${className}" src="${escapeHtml(plugin.iconDataUrl)}" alt="" />`;
+  }
+  const label = String(plugin?.displayName || plugin?.name || "P").trim().slice(0, 1).toUpperCase() || "P";
+  return `<span class="${className} fallback" aria-hidden="true">${escapeHtml(label)}</span>`;
+}
+
+function pluginMentionMarkdown(plugin) {
+  if (!plugin?.uri) return "";
+  return `[@${plugin.displayName || plugin.name}](${plugin.uri})`;
+}
+
+function renderInlinePluginRefs(html) {
+  return html.replace(/\[@([^\]\n]+)\]\((plugin:\/\/[^)\s]+)\)/g, (_match, label, uri) => {
+    const plugin = state.plugins.find((item) => item.uri === uri);
+    const displayName = plugin?.displayName || label || pluginDisplayNameFromUri(uri);
+    return `<span class="message-plugin-ref">${pluginIconHtml(plugin || { displayName }, "message-plugin-icon")}${escapeHtml(displayName)}</span>`;
+  });
+}
+
 function renderMarkdownLite(text) {
   const escaped = escapeHtml(text || "");
-  const withCodeBlocks = escaped.replace(/```([\s\S]*?)```/g, (_match, code) => `<pre><code>${code.trim()}</code></pre>`);
+  const withPluginRefs = renderInlinePluginRefs(escaped);
+  const withCodeBlocks = withPluginRefs.replace(/```([\s\S]*?)```/g, (_match, code) => `<pre><code>${code.trim()}</code></pre>`);
   return withCodeBlocks
     .split(/\n{2,}/)
     .map((part) => {
@@ -795,7 +843,7 @@ function mergePendingMessages(data) {
 
   const realUsers = data.messages.filter((message) => message.role === "user");
   const stillPending = pending.filter((pendingMessage) => {
-    const pendingText = normalizedMessageContent(pendingMessage.content);
+    const pendingText = normalizedMessageContent(pendingMessage.sentContent || pendingMessage.content);
     const pendingImages = messageImageCount(pendingMessage);
     return !realUsers.some((message) => {
       if (normalizedMessageContent(message.content) !== pendingText) return false;
@@ -830,6 +878,7 @@ function addPendingUserMessage(threadId, content, images = []) {
     kind: "pending",
     timestamp: new Date().toISOString(),
     content,
+    sentContent: content,
     images: images.map((image) => image.dataUrl)
   };
   state.pendingMessages.push(pending);
@@ -990,6 +1039,23 @@ async function fetchJson(url) {
   return data;
 }
 
+async function loadPlugins() {
+  if (state.pluginsLoaded || state.pluginsLoading) return;
+  state.pluginsLoading = true;
+  renderPluginMentionMenu();
+  try {
+    const data = await fetchJson("/api/plugins");
+    applyHomeContext(data);
+    state.plugins = Array.isArray(data.plugins) ? data.plugins : [];
+    state.pluginsLoaded = true;
+  } catch {
+    state.plugins = [];
+  } finally {
+    state.pluginsLoading = false;
+    renderPluginMentionMenu();
+  }
+}
+
 async function postJson(url, body) {
   const response = await fetch(url, {
     method: "POST",
@@ -1003,6 +1069,164 @@ async function postJson(url, body) {
     throw error;
   }
   return data;
+}
+
+function pluginMentionMatch() {
+  const input = els.composerInput;
+  const cursor = input.selectionStart ?? 0;
+  const before = input.value.slice(0, cursor);
+  const at = before.lastIndexOf("@");
+  if (at < 0) return null;
+  const prefix = before.slice(Math.max(0, at - 1), at);
+  if (prefix && !/\s/.test(prefix)) return null;
+  const query = before.slice(at + 1);
+  if (/[\n\r()[\]{}<>]/.test(query) || query.length > 48) return null;
+  return { start: at, end: cursor, query };
+}
+
+function filteredPlugins() {
+  const query = state.pluginQuery.trim().toLowerCase();
+  const plugins = state.plugins || [];
+  if (!query) return plugins.slice(0, 12);
+  return plugins
+    .map((plugin) => {
+      const displayName = String(plugin.displayName || "").toLowerCase();
+      const name = String(plugin.name || "").toLowerCase();
+      const marketplace = String(plugin.marketplace || "").toLowerCase();
+      const description = String(plugin.description || "").toLowerCase();
+      let score = 0;
+      if (displayName === query || name === query) score = 100;
+      else if (displayName.startsWith(query) || name.startsWith(query)) score = 80;
+      else if (displayName.includes(query) || name.includes(query)) score = 60;
+      else if (marketplace.includes(query)) score = 30;
+      else if (description.includes(query)) score = 10;
+      return { plugin, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || (a.plugin.displayName || a.plugin.name).localeCompare(b.plugin.displayName || b.plugin.name, undefined, { sensitivity: "base" }))
+    .map((item) => item.plugin)
+    .slice(0, 12);
+}
+
+function closePluginMentionMenu() {
+  state.pluginMenuOpen = false;
+  state.pluginQuery = "";
+  state.pluginTriggerStart = -1;
+  state.pluginActiveIndex = 0;
+  if (els.pluginMentionMenu) {
+    els.pluginMentionMenu.hidden = true;
+    els.pluginMentionMenu.innerHTML = "";
+  }
+}
+
+function renderSelectedPlugins() {
+  if (!els.pluginMentionTray) return;
+  els.pluginMentionTray.hidden = state.selectedPlugins.length === 0;
+  els.pluginMentionTray.innerHTML = state.selectedPlugins
+    .map(
+      (plugin) => `
+        <button class="plugin-chip" type="button" data-plugin-uri="${escapeHtml(plugin.uri)}" title="${escapeHtml(plugin.displayName || plugin.name)}">
+          ${pluginIconHtml(plugin)}
+          <span>${escapeHtml(plugin.displayName || plugin.name)}</span>
+          <small aria-hidden="true">×</small>
+        </button>
+      `
+    )
+    .join("");
+}
+
+function clearSelectedPlugins() {
+  state.selectedPlugins = [];
+  renderSelectedPlugins();
+}
+
+function selectedPluginMarkdown() {
+  return state.selectedPlugins.map((plugin) => pluginMentionMarkdown(plugin)).filter(Boolean).join(" ");
+}
+
+function composerSendMessage(message) {
+  return [selectedPluginMarkdown(), message.trim()].filter(Boolean).join("\n\n").trim();
+}
+
+function renderPluginMentionMenu() {
+  if (!els.pluginMentionMenu || !state.pluginMenuOpen) return;
+  if (state.pluginsLoading) {
+    els.pluginMentionMenu.hidden = false;
+    els.pluginMentionMenu.innerHTML = `<div class="plugin-mention-state">${escapeHtml(t("pluginPickerLoading"))}</div>`;
+    return;
+  }
+  const plugins = filteredPlugins();
+  state.pluginActiveIndex = Math.max(0, Math.min(state.pluginActiveIndex, Math.max(plugins.length - 1, 0)));
+  els.pluginMentionMenu.hidden = false;
+  if (!plugins.length) {
+    els.pluginMentionMenu.innerHTML = `<div class="plugin-mention-state">${escapeHtml(t("pluginPickerEmpty"))}</div>`;
+    return;
+  }
+  els.pluginMentionMenu.innerHTML = `
+    <div class="plugin-mention-heading">${escapeHtml(t("pluginPickerTitle"))}</div>
+    ${plugins
+      .map((plugin, index) => {
+        const active = index === state.pluginActiveIndex ? " active" : "";
+        const description = plugin.description ? `<span>${escapeHtml(plugin.description)}</span>` : `<span>${escapeHtml(plugin.uri || "")}</span>`;
+        return `
+          <button
+            class="plugin-mention-item${active}"
+            type="button"
+            role="option"
+            aria-selected="${index === state.pluginActiveIndex ? "true" : "false"}"
+            data-plugin-index="${index}"
+          >
+            ${pluginIconHtml(plugin, "plugin-mention-icon")}
+            <strong>${escapeHtml(plugin.displayName || plugin.name)}</strong>
+            ${description}
+          </button>
+        `;
+      })
+      .join("")}
+  `;
+}
+
+function updatePluginMentionMenu() {
+  if (els.composerInput.disabled) {
+    closePluginMentionMenu();
+    return;
+  }
+  const match = pluginMentionMatch();
+  if (!match) {
+    closePluginMentionMenu();
+    return;
+  }
+  state.pluginMenuOpen = true;
+  state.pluginQuery = match.query;
+  state.pluginTriggerStart = match.start;
+  renderPluginMentionMenu();
+  loadPlugins().catch(() => {});
+}
+
+function insertPluginMention(plugin) {
+  if (!plugin?.uri) return;
+  const input = els.composerInput;
+  const cursor = input.selectionStart ?? input.value.length;
+  const start = state.pluginTriggerStart >= 0 ? state.pluginTriggerStart : cursor;
+  const separator = input.value.slice(cursor).startsWith(" ") || cursor === input.value.length ? "" : " ";
+  const nextValue = `${input.value.slice(0, start)}${separator}${input.value.slice(cursor)}`;
+  const nextCursor = start + separator.length;
+  input.value = nextValue;
+  input.setSelectionRange(nextCursor, nextCursor);
+  if (!state.selectedPlugins.some((item) => item.uri === plugin.uri)) {
+    state.selectedPlugins.push(plugin);
+    renderSelectedPlugins();
+  }
+  closePluginMentionMenu();
+  input.focus();
+}
+
+function selectActivePluginMention() {
+  if (!state.pluginMenuOpen || state.pluginsLoading) return false;
+  const plugin = filteredPlugins()[state.pluginActiveIndex];
+  if (!plugin) return false;
+  insertPluginMention(plugin);
+  return true;
 }
 
 function renderComposerMode() {
@@ -1019,6 +1243,7 @@ function renderComposerMode() {
   els.composerInput.placeholder = allowWrite ? (state.selectedId === DRAFT_THREAD_ID ? t("newConversationReady") : t("sendToCodex")) : t("readonlyPlaceholder");
   if (!allowWrite) els.sendStatus.textContent = t("readonly");
   else if (els.sendStatus.textContent === t("readonly")) els.sendStatus.textContent = "";
+  if (els.composerInput.disabled) closePluginMentionMenu();
 }
 
 async function loadConfig() {
@@ -1042,6 +1267,11 @@ function applyHomeContext(data) {
   state.approvalSubmissions = {};
   state.expandedNotices = {};
   state.lastMessagesData = null;
+  state.plugins = [];
+  state.pluginsLoaded = false;
+  state.pluginsLoading = false;
+  clearSelectedPlugins();
+  closePluginMentionMenu();
   els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("loading"))}</div>`;
   return true;
 }
@@ -1141,6 +1371,7 @@ els.threadList.addEventListener("click", (event) => {
   if (!button) return;
   state.selectedId = button.dataset.id;
   if (state.selectedId !== DRAFT_THREAD_ID) clearDraftThread();
+  clearSelectedPlugins();
   state.messagesSignature = "";
   state.threadStatus = null;
   state.lastMessagesData = null;
@@ -1154,6 +1385,7 @@ els.threadList.addEventListener("click", (event) => {
 els.newThreadButton.addEventListener("click", () => {
   if (!state.config?.allowWrite || els.newThreadButton.disabled) return;
   els.sendStatus.textContent = "";
+  clearSelectedPlugins();
   state.draftThread = {
     id: DRAFT_THREAD_ID,
     title: t("newConversationDraft"),
@@ -1325,14 +1557,72 @@ els.authForm.addEventListener("submit", async (event) => {
 });
 
 els.composerInput.addEventListener("keydown", (event) => {
+  if (state.pluginMenuOpen) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const count = filteredPlugins().length;
+      if (count) {
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        state.pluginActiveIndex = (state.pluginActiveIndex + delta + count) % count;
+        renderPluginMentionMenu();
+      }
+      return;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      if (selectActivePluginMention()) {
+        event.preventDefault();
+        return;
+      }
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePluginMentionMenu();
+      return;
+    }
+  }
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     els.composerForm.requestSubmit();
   }
 });
 
+els.composerInput.addEventListener("input", () => {
+  state.pluginActiveIndex = 0;
+  updatePluginMentionMenu();
+});
+
+els.composerInput.addEventListener("click", () => {
+  updatePluginMentionMenu();
+});
+
+els.composerInput.addEventListener("blur", () => {
+  window.setTimeout(() => {
+    if (!els.pluginMentionMenu?.contains(document.activeElement)) closePluginMentionMenu();
+  }, 120);
+});
+
+els.pluginMentionMenu?.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+});
+
+els.pluginMentionMenu?.addEventListener("click", (event) => {
+  const button = event.target.closest(".plugin-mention-item");
+  if (!button) return;
+  const plugin = filteredPlugins()[Number(button.dataset.pluginIndex)];
+  insertPluginMention(plugin);
+});
+
+els.pluginMentionTray?.addEventListener("click", (event) => {
+  const button = event.target.closest(".plugin-chip");
+  if (!button) return;
+  state.selectedPlugins = state.selectedPlugins.filter((plugin) => plugin.uri !== button.dataset.pluginUri);
+  renderSelectedPlugins();
+  els.composerInput.focus();
+});
+
 els.attachButton.addEventListener("click", () => {
   if (els.attachButton.disabled) return;
+  closePluginMentionMenu();
   els.imageInput.click();
 });
 
@@ -1351,18 +1641,20 @@ els.attachmentTray.addEventListener("click", (event) => {
 
 els.composerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  closePluginMentionMenu();
   if (!state.config?.allowWrite) return;
   if (state.composerBusy) return;
   const thinking = Boolean(state.threadStatus?.thinking);
   const isDraftThread = state.selectedId === DRAFT_THREAD_ID;
   const message = els.composerInput.value.trim();
+  const sendMessage = composerSendMessage(message);
   const images = [...state.imageAttachments];
-  if (!thinking && !message && !images.length) return;
-  if (thinking && (message || images.length)) {
+  if (!thinking && !sendMessage && !images.length) return;
+  if (thinking && (sendMessage || images.length)) {
     els.sendStatus.textContent = t("busyCannotSend");
     return;
   }
-  const pendingMessageId = thinking || isDraftThread ? null : addPendingUserMessage(state.selectedId, message, images);
+  const pendingMessageId = thinking || isDraftThread ? null : addPendingUserMessage(state.selectedId, sendMessage, images);
   state.composerBusy = true;
   renderComposerMode();
   els.sendStatus.textContent = "";
@@ -1375,12 +1667,13 @@ els.composerForm.addEventListener("submit", async (event) => {
       refreshSoon();
     } else {
       const result = await postJson("/api/send", {
-        message,
+        message: sendMessage,
         threadId: isDraftThread ? null : state.selectedId,
         newThread: isDraftThread,
         images: images.map(({ name, mimeType, data }) => ({ name, mimeType, data }))
       });
       els.composerInput.value = "";
+      clearSelectedPlugins();
       state.imageAttachments = [];
       renderImageAttachments();
       if (isDraftThread && result.threadId) {
