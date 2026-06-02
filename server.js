@@ -28,7 +28,6 @@ function parseCliArgs(argv) {
     else if (flag === "--write") options.write = true;
     else if (flag === "--readonly") options.readonly = true;
     else if (flag === "--no-auth") options.noAuth = true;
-    else if (flag === "--dev-any-code") options.devAnyCode = true;
     else if (arg) {
       console.error(`Unknown option: ${arg}`);
       options.help = true;
@@ -74,7 +73,6 @@ const CODEX_HOME_FIXED = Boolean(cli.codexHome || process.env.CODEX_LAN_FIXED_CO
 const HOST = cli.host || process.env.HOST || "0.0.0.0";
 const PORT = Number(cli.port || process.env.PORT || 8787);
 const AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
-const DEV_ANY_CODE = Boolean(cli.devAnyCode || process.env.CODEX_LAN_DEV_ANY_CODE === "1");
 const ACCESS_TOKEN = cli.password || cli.token || process.env.CODEX_LAN_PASSWORD || process.env.CODEX_LAN_TOKEN || String(randomInt(100000, 1000000));
 const ALLOW_WRITE = cli.readonly ? false : Boolean(cli.write || process.env.CODEX_LAN_ALLOW_WRITE === "1" || process.env.CODEX_ALLOW_WRITE === "1");
 const CODEX_IPC_SOCKET =
@@ -150,7 +148,6 @@ function requestToken(req, url) {
 function isAuthorized(req, url) {
   if (!AUTH_REQUIRED) return true;
   const token = requestToken(req, url);
-  if (DEV_ANY_CODE) return Boolean(String(token || "").trim());
   return token === ACCESS_TOKEN;
 }
 
@@ -161,7 +158,7 @@ function requireAuthorized(req, res, url) {
 }
 
 function loginUrlFor(baseUrl) {
-  if (!AUTH_REQUIRED || DEV_ANY_CODE) return baseUrl;
+  if (!AUTH_REQUIRED) return baseUrl;
   const url = new URL(baseUrl);
   url.searchParams.set("login", ACCESS_TOKEN);
   return url.toString();
@@ -2690,7 +2687,6 @@ const server = http.createServer(async (req, res) => {
         codexHomeChangedAt: homeState.changedAt,
         codexIpcSocket: CODEX_IPC_SOCKET,
         authRequired: AUTH_REQUIRED,
-        devAnyCode: DEV_ANY_CODE,
         allowWrite: ALLOW_WRITE,
         now: new Date().toISOString()
       });
@@ -2786,7 +2782,7 @@ server.listen(PORT, HOST, () => {
   const primaryUrl = lanUrls[0] || localUrl;
   const printQr = () => {
     console.log("");
-    if (AUTH_REQUIRED && !DEV_ANY_CODE) console.log("QR:     opens the LAN page and signs in automatically");
+    if (AUTH_REQUIRED) console.log("QR:     opens the LAN page and signs in automatically");
     else console.log("QR:     opens the LAN page");
     qrcode.generate(loginUrlFor(primaryUrl), { small: true });
   };
@@ -2794,10 +2790,10 @@ server.listen(PORT, HOST, () => {
   console.log("Codex LAN Companion is running");
   console.log(`Local:  ${localUrl}`);
   for (const lanUrl of lanUrls) console.log(`LAN:    ${lanUrl}`);
-  if (AUTH_REQUIRED) console.log(`Access code: ${DEV_ANY_CODE ? "any non-empty code accepted for testing" : ACCESS_TOKEN}`);
+  if (AUTH_REQUIRED) console.log(`Access code: ${ACCESS_TOKEN}`);
   console.log(
     `Mode:   ${ALLOW_WRITE ? "write enabled" : "read-only"}${
-      AUTH_REQUIRED ? (DEV_ANY_CODE ? " · dev any-code" : " · access-code protected") : " · auth disabled"
+      AUTH_REQUIRED ? " · access-code protected" : " · auth disabled"
     }`
   );
   console.log(`Data:   ${codexHomeState.home}${codexHomeState.fixed ? " (fixed)" : " (dynamic)"}`);
@@ -2813,7 +2809,7 @@ server.listen(PORT, HOST, () => {
         console.log(`Local:  ${localUrl}`);
         for (const lanUrl of lanUrls) console.log(`LAN:    ${lanUrl}`);
       } else if (command === "code" && AUTH_REQUIRED) {
-        console.log(`Access code: ${DEV_ANY_CODE ? "any non-empty code accepted for testing" : ACCESS_TOKEN}`);
+        console.log(`Access code: ${ACCESS_TOKEN}`);
       } else if (command === "help" || command === "?") {
         console.log("Commands: qr, url, code, help");
       } else if (command) {

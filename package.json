@@ -7,16 +7,32 @@
   "bin": {
     "codex-lan-companion": "./server.js"
   },
+  "files": [
+    "server.js",
+    "public",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "check": "node --check server.js && node --check public/app.js",
     "start": "node server.js",
     "start:write": "node server.js --write"
   },
   "keywords": [
     "codex",
+    "codex-desktop",
     "lan",
     "remote",
-    "companion"
+    "companion",
+    "mobile",
+    "browser",
+    "local-first"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=18"

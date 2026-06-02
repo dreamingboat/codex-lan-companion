@@ -1,5 +1,15 @@
 node_modules/
-npm-debug.log*
 .DS_Store
+
+*.log
+npm-debug.log*
 app-session-*.js
 main-*.js
+
+.env
+.env.*
+
+coverage/
+dist/
+tmp/
+temp/
