@@ -1170,16 +1170,25 @@ h2 {
 .account-summary {
   display: inline-flex;
   min-width: 0;
-  max-width: min(38vw, 360px);
+  max-width: min(30vw, 240px);
   align-items: center;
-  gap: 7px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #f7f6f2;
+  gap: 6px;
+  border: 1px solid #e5e1d9;
+  border-radius: 7px;
+  background: rgba(247, 246, 242, 0.72);
   color: var(--text);
-  padding: 6px 8px;
+  cursor: pointer;
+  font: inherit;
+  padding: 5px 7px;
   font-size: 12px;
   line-height: 1.2;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.account-summary:hover,
+.account-summary.expanded {
+  border-color: #d8d2c8;
+  background: rgba(247, 246, 242, 0.96);
 }
 
 .account-name {
@@ -1192,34 +1201,64 @@ h2 {
 
 .account-plan {
   flex: 0 0 auto;
-  border-left: 1px solid var(--border);
+  border-left: 1px solid #e2ded6;
   color: var(--muted);
-  padding-left: 7px;
+  padding-left: 6px;
 }
 
-.account-toggle {
-  display: inline-grid;
-  width: 30px;
-  height: 30px;
+.plugin-picker-button {
+  display: inline-flex;
+  height: 28px;
   flex: 0 0 auto;
-  place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel);
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #e5e1d9;
+  border-radius: 7px;
+  background: rgba(247, 246, 242, 0.72);
   color: var(--muted);
   cursor: pointer;
+  font: inherit;
+  font-size: 12px;
   line-height: 1;
-  transition: transform 160ms ease, color 160ms ease, border-color 160ms ease;
+  padding: 0 7px;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
 }
 
-.account-toggle:hover,
-.account-toggle.expanded {
-  border-color: #c7c1b8;
+.plugin-picker-dots {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(2, 5px);
+  grid-template-rows: repeat(2, 5px);
+  place-content: center;
+  gap: 4px;
+}
+
+.plugin-picker-dots span {
+  width: 5px;
+  height: 5px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.plugin-picker-label {
+  color: currentColor;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.plugin-picker-button:hover,
+.plugin-picker-button.active {
+  border-color: #d8d2c8;
+  background: rgba(247, 246, 242, 0.96);
   color: var(--text);
 }
 
-.account-toggle.expanded {
-  transform: rotate(180deg);
+.plugin-picker-button:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .account-panel {
@@ -1505,13 +1544,14 @@ h2 {
   }
 
   .account-summary {
-    max-width: 44vw;
-    padding: 6px 7px;
+    max-width: 34vw;
+    padding: 5px 6px;
   }
 
-  .account-toggle {
-    width: 28px;
+  .plugin-picker-button {
     height: 28px;
+    gap: 5px;
+    padding: 0 6px;
   }
 
   .usage-grid {

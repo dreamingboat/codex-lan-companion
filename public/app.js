@@ -58,7 +58,7 @@ const els = {
   accountSummary: document.querySelector("#accountSummary"),
   accountName: document.querySelector("#accountName"),
   accountPlan: document.querySelector("#accountPlan"),
-  accountToggle: document.querySelector("#accountToggle"),
+  pluginPickerButton: document.querySelector("#pluginPickerButton"),
   accountPanel: document.querySelector("#accountPanel"),
   authGate: document.querySelector("#authGate"),
   authForm: document.querySelector("#authForm"),
@@ -315,8 +315,10 @@ function applyStaticText() {
   document.querySelector(".toggle").setAttribute("title", t("tool"));
   document.querySelector(".toggle").setAttribute("aria-label", t("tool"));
   els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("pickThread"))}</div>`;
-  els.accountToggle.setAttribute("title", t("showUsage"));
-  els.accountToggle.setAttribute("aria-label", t("showUsage"));
+  els.accountSummary.setAttribute("title", t("showUsage"));
+  els.accountSummary.setAttribute("aria-label", t("showUsage"));
+  els.pluginPickerButton.setAttribute("title", t("pluginPickerTitle"));
+  els.pluginPickerButton.setAttribute("aria-label", t("pluginPickerTitle"));
   els.attachButton.setAttribute("title", t("addImage"));
   els.attachButton.setAttribute("aria-label", t("addImage"));
   els.sendButton.textContent = t("send");
@@ -983,8 +985,8 @@ function renderAccount() {
   els.accountName.textContent = label;
   els.accountPlan.textContent = plan;
   els.accountSummary.title = account?.user?.email || label;
-  els.accountToggle.setAttribute("aria-expanded", String(state.accountExpanded));
-  els.accountToggle.classList.toggle("expanded", state.accountExpanded);
+  els.accountSummary.setAttribute("aria-expanded", String(state.accountExpanded));
+  els.accountSummary.classList.toggle("expanded", state.accountExpanded);
   els.accountPanel.hidden = !state.accountExpanded;
 
   if (!state.accountExpanded) return;
@@ -1113,6 +1115,8 @@ function closePluginMentionMenu() {
   state.pluginQuery = "";
   state.pluginTriggerStart = -1;
   state.pluginActiveIndex = 0;
+  els.pluginPickerButton?.setAttribute("aria-expanded", "false");
+  els.pluginPickerButton?.classList.remove("active");
   if (els.pluginMentionMenu) {
     els.pluginMentionMenu.hidden = true;
     els.pluginMentionMenu.innerHTML = "";
@@ -1203,16 +1207,30 @@ function updatePluginMentionMenu() {
   loadPlugins().catch(() => {});
 }
 
+function openPluginPickerMenu() {
+  if (els.composerInput.disabled) return;
+  closeAccountPanel();
+  state.pluginMenuOpen = true;
+  state.pluginQuery = "";
+  state.pluginTriggerStart = -1;
+  state.pluginActiveIndex = 0;
+  els.pluginPickerButton?.setAttribute("aria-expanded", "true");
+  els.pluginPickerButton?.classList.add("active");
+  renderPluginMentionMenu();
+  loadPlugins().catch(() => {});
+}
+
 function insertPluginMention(plugin) {
   if (!plugin?.uri) return;
   const input = els.composerInput;
-  const cursor = input.selectionStart ?? input.value.length;
-  const start = state.pluginTriggerStart >= 0 ? state.pluginTriggerStart : cursor;
-  const separator = input.value.slice(cursor).startsWith(" ") || cursor === input.value.length ? "" : " ";
-  const nextValue = `${input.value.slice(0, start)}${separator}${input.value.slice(cursor)}`;
-  const nextCursor = start + separator.length;
-  input.value = nextValue;
-  input.setSelectionRange(nextCursor, nextCursor);
+  if (state.pluginTriggerStart >= 0) {
+    const cursor = input.selectionStart ?? input.value.length;
+    const separator = input.value.slice(cursor).startsWith(" ") || cursor === input.value.length ? "" : " ";
+    const nextValue = `${input.value.slice(0, state.pluginTriggerStart)}${separator}${input.value.slice(cursor)}`;
+    const nextCursor = state.pluginTriggerStart + separator.length;
+    input.value = nextValue;
+    input.setSelectionRange(nextCursor, nextCursor);
+  }
   if (!state.selectedPlugins.some((item) => item.uri === plugin.uri)) {
     state.selectedPlugins.push(plugin);
     renderSelectedPlugins();
@@ -1235,6 +1253,7 @@ function renderComposerMode() {
   const hasTarget = Boolean(state.selectedId);
   els.composerInput.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.attachButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
+  els.pluginPickerButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.sendButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.sendButton.classList.toggle("stop-mode", allowWrite && thinking);
   els.sendButton.textContent = allowWrite && thinking ? "■" : t("send");
@@ -1506,16 +1525,33 @@ els.lockButton.addEventListener("click", () => {
   lockApp(t("lockedAgain"));
 });
 
-els.accountToggle.addEventListener("click", () => {
+els.accountSummary.addEventListener("click", () => {
   state.accountExpanded = !state.accountExpanded;
   renderAccount();
   if (state.accountExpanded) loadAccount();
 });
 
+els.pluginPickerButton.addEventListener("click", () => {
+  if (els.pluginPickerButton.disabled) return;
+  if (state.pluginMenuOpen && state.pluginTriggerStart < 0) {
+    closePluginMentionMenu();
+    return;
+  }
+  openPluginPickerMenu();
+});
+
 document.addEventListener("click", (event) => {
-  if (!state.accountExpanded) return;
-  if (els.accountPanel.contains(event.target) || els.accountToggle.contains(event.target)) return;
-  closeAccountPanel();
+  if (state.accountExpanded && !els.accountPanel.contains(event.target) && !els.accountSummary.contains(event.target)) {
+    closeAccountPanel();
+  }
+  if (
+    state.pluginMenuOpen &&
+    !els.pluginMentionMenu?.contains(event.target) &&
+    !els.composerInput.contains(event.target) &&
+    !els.pluginPickerButton.contains(event.target)
+  ) {
+    closePluginMentionMenu();
+  }
 });
 
 els.authReveal.addEventListener("click", () => {
@@ -1598,7 +1634,10 @@ els.composerInput.addEventListener("click", () => {
 
 els.composerInput.addEventListener("blur", () => {
   window.setTimeout(() => {
-    if (!els.pluginMentionMenu?.contains(document.activeElement)) closePluginMentionMenu();
+    if (state.pluginMenuOpen && state.pluginTriggerStart < 0) return;
+    if (!els.pluginMentionMenu?.contains(document.activeElement) && !els.pluginPickerButton.contains(document.activeElement)) {
+      closePluginMentionMenu();
+    }
   }, 120);
 });
 

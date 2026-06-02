@@ -87,19 +87,32 @@
           <div class="composer-actions">
             <div class="composer-left">
               <div class="account-widget">
-                <div id="accountSummary" class="account-summary" aria-live="polite">
-                  <span id="accountName" class="account-name">Codex</span>
-                  <span id="accountPlan" class="account-plan">-</span>
-                </div>
                 <button
-                  id="accountToggle"
-                  class="account-toggle"
+                  id="accountSummary"
+                  class="account-summary"
                   type="button"
                   title="显示套餐用量"
                   aria-label="显示套餐用量"
                   aria-expanded="false"
                 >
-                  ⌃
+                  <span id="accountName" class="account-name">Codex</span>
+                  <span id="accountPlan" class="account-plan">-</span>
+                </button>
+                <button
+                  id="pluginPickerButton"
+                  class="plugin-picker-button"
+                  type="button"
+                  title="引用插件"
+                  aria-label="引用插件"
+                  aria-expanded="false"
+                >
+                  <span class="plugin-picker-dots" aria-hidden="true">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </span>
+                  <span class="plugin-picker-label">插件</span>
                 </button>
               </div>
             </div>
