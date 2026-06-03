@@ -561,7 +561,8 @@ function renderInlinePluginRefs(html) {
 function renderMarkdownLite(text) {
   const escaped = escapeHtml(text || "");
   const withPluginRefs = renderInlinePluginRefs(escaped);
-  const withCodeBlocks = withPluginRefs.replace(/```([\s\S]*?)```/g, (_match, code) => `<pre><code>${code.trim()}</code></pre>`);
+  const withLocalImages = renderGeneratedImageMarkdown(withPluginRefs);
+  const withCodeBlocks = withLocalImages.replace(/```([\s\S]*?)```/g, (_match, code) => `<pre><code>${code.trim()}</code></pre>`);
   return withCodeBlocks
     .split(/\n{2,}/)
     .map((part) => {
@@ -569,6 +570,19 @@ function renderMarkdownLite(text) {
       return `<p>${part.replaceAll("\n", "<br>")}</p>`;
     })
     .join("");
+}
+
+function renderGeneratedImageMarkdown(text) {
+  const generatedRoot = "/Users/openclaw/.codex/generated_images/";
+  return String(text || "").replace(
+    /!\[([^\]]*)\]\((\/Users\/openclaw\/\.codex\/generated_images\/[^)\s]+\.(?:png|jpe?g|webp|svg))\)/gi,
+    (_match, alt, imagePath) => {
+      if (!imagePath.startsWith(generatedRoot)) return _match;
+      const tokenParam = state.authToken ? `&token=${encodeURIComponent(state.authToken)}` : "";
+      const src = `/api/local-image?path=${encodeURIComponent(imagePath)}${tokenParam}`;
+      return `<img class="message-image generated-image" src="${src}" alt="${alt}" loading="lazy" />`;
+    }
+  );
 }
 
 function imageNameFromPath(value) {

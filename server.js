@@ -81,9 +81,11 @@ const CODEX_IPC_SOCKET =
     : path.join(os.tmpdir(), "codex-ipc", typeof process.getuid === "function" ? `ipc-${process.getuid()}.sock` : "ipc.sock"));
 const CODEX_CLI = process.env.CODEX_CLI || (existsSync("/Applications/Codex.app/Contents/Resources/codex") ? "/Applications/Codex.app/Contents/Resources/codex" : "codex");
 const PUBLIC_DIR = path.join(__dirname, "public");
+const GENERATED_IMAGES_DIR = path.join(os.homedir(), ".codex", "generated_images");
 const MAX_SEND_IMAGES = 4;
 const MAX_SEND_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_SEND_BODY_BYTES = 32 * 1024 * 1024;
+const MAX_LOCAL_IMAGE_BYTES = 10 * 1024 * 1024;
 const MIN_SEND_IMAGE_BYTES = 512;
 const MIN_SEND_IMAGE_EDGE = 16;
 const MAX_SEND_IMAGE_EDGE = 4096;
@@ -2869,9 +2871,43 @@ async function serveStatic(res, pathname) {
   }
 }
 
+async function serveLocalImage(res, filePath) {
+  const normalized = path.resolve(String(filePath || ""));
+  const root = path.resolve(GENERATED_IMAGES_DIR);
+  if (!normalized.startsWith(root + path.sep)) {
+    sendText(res, 403, "Forbidden");
+    return;
+  }
+  const mimeType = mimeTypeForAsset(normalized);
+  if (!["image/png", "image/jpeg", "image/webp", "image/svg+xml"].includes(mimeType)) {
+    sendText(res, 415, "Unsupported image type");
+    return;
+  }
+  try {
+    const stat = await fs.stat(normalized);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_LOCAL_IMAGE_BYTES) {
+      sendText(res, 404, "Not found");
+      return;
+    }
+    const data = await fs.readFile(normalized);
+    res.writeHead(200, {
+      "content-type": mimeType,
+      "cache-control": "no-store, must-revalidate"
+    });
+    res.end(data);
+  } catch {
+    sendText(res, 404, "Not found");
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   try {
+    if (req.method === "GET" && url.pathname === "/api/local-image") {
+      if (!requireAuthorized(req, res, url)) return;
+      await serveLocalImage(res, url.searchParams.get("path"));
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/api/health") {
       if (!requireAuthorized(req, res, url)) return;
       keepIpcWarm();

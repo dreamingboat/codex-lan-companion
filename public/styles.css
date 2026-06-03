@@ -661,6 +661,13 @@ h2 {
   object-fit: cover;
 }
 
+.generated-image {
+  width: min(520px, 100%);
+  max-height: 520px;
+  margin-top: 8px;
+  object-fit: contain;
+}
+
 .message-image-pill {
   display: inline-flex;
   max-width: 100%;
