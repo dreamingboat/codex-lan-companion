@@ -40,18 +40,20 @@ Prerequisites:
 2. Install Node.js 18 or newer.
 3. Put your Mac and the browser device you want to use on the same Wi-Fi network.
 
-Run without installing globally:
+Run the current GitHub release without installing globally:
 
 ```bash
-npx codex-lan-companion
+npx github:dreamingboat/codex-lan-companion
 ```
 
 Or install once and then run it:
 
 ```bash
-npm install -g codex-lan-companion
+npm install -g github:dreamingboat/codex-lan-companion
 codex-lan-companion
 ```
+
+After this project is published to the npm registry, the shorter `npm install -g codex-lan-companion` command will also work.
 
 The terminal prints a local URL, a LAN URL, a short numeric access code, and a QR code. Scan the QR code from a phone/tablet to open the LAN web page and sign in automatically, or open the LAN URL manually from any browser device and enter the access code shown in the terminal.
 

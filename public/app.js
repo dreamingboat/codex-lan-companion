@@ -1919,7 +1919,7 @@ els.composerInput.addEventListener("keydown", (event) => {
       return;
     }
   }
-  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+  if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     els.composerForm.requestSubmit();
   }
