@@ -11,6 +11,7 @@
     "server.js",
     "public",
     "README.md",
+    "README.zh-CN.md",
     "CHANGELOG.md",
     "SECURITY.md",
     "LICENSE"
@@ -18,7 +19,7 @@
   "scripts": {
     "check": "node --check server.js && node --check public/app.js",
     "start": "node server.js",
-    "start:write": "node server.js --write"
+    "start:readonly": "node server.js --readonly"
   },
   "keywords": [
     "codex",

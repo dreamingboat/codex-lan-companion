@@ -28,7 +28,15 @@ const state = {
   pluginQuery: "",
   pluginTriggerStart: -1,
   pluginActiveIndex: 0,
-  selectedPlugins: []
+  selectedPlugins: [],
+  skills: [],
+  skillsLoaded: false,
+  skillsLoading: false,
+  skillMenuOpen: false,
+  skillQuery: "",
+  skillTriggerStart: -1,
+  skillActiveIndex: 0,
+  selectedSkills: []
 };
 
 const els = {
@@ -45,11 +53,12 @@ const els = {
   searchInput: document.querySelector("#searchInput"),
   newThreadButton: document.querySelector("#newThreadButton"),
   toolToggle: document.querySelector("#toolToggle"),
-  lockButton: document.querySelector("#lockButton"),
   composerForm: document.querySelector("#composerForm"),
   composerInput: document.querySelector("#composerInput"),
   pluginMentionTray: document.querySelector("#pluginMentionTray"),
   pluginMentionMenu: document.querySelector("#pluginMentionMenu"),
+  skillMentionTray: document.querySelector("#skillMentionTray"),
+  skillMentionMenu: document.querySelector("#skillMentionMenu"),
   imageInput: document.querySelector("#imageInput"),
   attachmentTray: document.querySelector("#attachmentTray"),
   attachButton: document.querySelector("#attachButton"),
@@ -59,6 +68,7 @@ const els = {
   accountName: document.querySelector("#accountName"),
   accountPlan: document.querySelector("#accountPlan"),
   pluginPickerButton: document.querySelector("#pluginPickerButton"),
+  skillPickerButton: document.querySelector("#skillPickerButton"),
   accountPanel: document.querySelector("#accountPanel"),
   authGate: document.querySelector("#authGate"),
   authForm: document.querySelector("#authForm"),
@@ -120,14 +130,11 @@ const I18N = {
     imageDimensionsInvalid: "图片尺寸不支持，宽高需在 {min}-{max}px 之间。",
     tooManyImages: "最多只能添加 {count} 张图片。",
     sendToCodex: "发送到当前 Codex 窗口",
-    readonlyPlaceholder: "只读模式：启动时加 --write 才能发送",
+    readonlyPlaceholder: "只读模式：重启时不要加 --readonly 才能发送",
     readonly: "只读模式",
     needAccessCode: "需要访问码",
     enterAccessCode: "请输入访问码。",
     accessCodeWrong: "访问码不正确，请重新输入。",
-    lockedAgain: "已锁定，请重新输入访问码。",
-    locked: "已锁定",
-    unlocked: "当前已解锁，点击锁定",
     syncFailed: "同步失败",
     syncTemporaryFailed: "同步暂时失败",
     emptyThread: "这个对话暂时没有可展示内容。",
@@ -158,6 +165,9 @@ const I18N = {
     pluginPickerTitle: "引用插件",
     pluginPickerLoading: "正在加载插件...",
     pluginPickerEmpty: "没有找到匹配插件",
+    skillPickerTitle: "引用技能",
+    skillPickerLoading: "正在加载技能...",
+    skillPickerEmpty: "没有找到匹配技能",
     untitled: "Untitled",
     separator: " · "
   },
@@ -211,14 +221,11 @@ const I18N = {
     imageDimensionsInvalid: "Unsupported image dimensions. Width and height must be {min}-{max}px.",
     tooManyImages: "You can attach up to {count} images.",
     sendToCodex: "Send to current Codex window",
-    readonlyPlaceholder: "Read-only: restart with --write to send",
+    readonlyPlaceholder: "Read-only: restart without --readonly to send",
     readonly: "Read-only",
     needAccessCode: "Access code required",
     enterAccessCode: "Enter the access code.",
     accessCodeWrong: "Incorrect access code. Try again.",
-    lockedAgain: "Locked. Enter the access code again.",
-    locked: "Locked",
-    unlocked: "Unlocked. Click to lock",
     syncFailed: "Sync failed",
     syncTemporaryFailed: "Sync temporarily failed",
     emptyThread: "This conversation has no displayable content yet.",
@@ -249,6 +256,9 @@ const I18N = {
     pluginPickerTitle: "Mention plugin",
     pluginPickerLoading: "Loading plugins...",
     pluginPickerEmpty: "No matching plugins",
+    skillPickerTitle: "Mention skill",
+    skillPickerLoading: "Loading skills...",
+    skillPickerEmpty: "No matching skills",
     untitled: "Untitled",
     separator: " · "
   }
@@ -319,9 +329,12 @@ function applyStaticText() {
   els.accountSummary.setAttribute("aria-label", t("showUsage"));
   els.pluginPickerButton.setAttribute("title", t("pluginPickerTitle"));
   els.pluginPickerButton.setAttribute("aria-label", t("pluginPickerTitle"));
+  els.skillPickerButton.setAttribute("title", t("skillPickerTitle"));
+  els.skillPickerButton.setAttribute("aria-label", t("skillPickerTitle"));
   els.attachButton.setAttribute("title", t("addImage"));
   els.attachButton.setAttribute("aria-label", t("addImage"));
-  els.sendButton.textContent = t("send");
+  els.sendButton.setAttribute("title", t("send"));
+  els.sendButton.setAttribute("aria-label", t("send"));
   els.composerInput.placeholder = t("sendToCodex");
 }
 
@@ -369,20 +382,12 @@ function authHeaders(extra = {}) {
 function showAuthGate(message = "") {
   els.authGate.hidden = false;
   els.authError.textContent = message;
-  renderLockState(false);
   window.setTimeout(() => els.authInput.focus(), 0);
 }
 
 function hideAuthGate() {
   els.authGate.hidden = true;
   els.authError.textContent = "";
-  renderLockState(true);
-}
-
-function renderLockState(unlocked) {
-  els.lockButton.textContent = unlocked ? "🔓" : "🔒";
-  els.lockButton.setAttribute("aria-label", unlocked ? t("unlocked") : t("locked"));
-  els.lockButton.setAttribute("title", unlocked ? t("unlocked") : t("locked"));
 }
 
 function lockApp(message = "") {
@@ -1051,11 +1056,36 @@ async function loadPlugins() {
     applyHomeContext(data);
     state.plugins = Array.isArray(data.plugins) ? data.plugins : [];
     state.pluginsLoaded = true;
-  } catch {
+  } catch (error) {
+    if (error.status === 401) {
+      lockApp(t("accessCodeWrong"));
+      return;
+    }
     state.plugins = [];
   } finally {
     state.pluginsLoading = false;
     renderPluginMentionMenu();
+  }
+}
+
+async function loadSkills() {
+  if (state.skillsLoaded || state.skillsLoading) return;
+  state.skillsLoading = true;
+  renderSkillMentionMenu();
+  try {
+    const data = await fetchJson("/api/skills");
+    applyHomeContext(data);
+    state.skills = Array.isArray(data.skills) ? data.skills : [];
+    state.skillsLoaded = true;
+  } catch (error) {
+    if (error.status === 401) {
+      lockApp(t("accessCodeWrong"));
+      return;
+    }
+    state.skills = [];
+  } finally {
+    state.skillsLoading = false;
+    renderSkillMentionMenu();
   }
 }
 
@@ -1087,6 +1117,19 @@ function pluginMentionMatch() {
   return { start: at, end: cursor, query };
 }
 
+function skillMentionMatch() {
+  const input = els.composerInput;
+  const cursor = input.selectionStart ?? 0;
+  const before = input.value.slice(0, cursor);
+  const slash = before.lastIndexOf("/");
+  if (slash < 0) return null;
+  const prefix = before.slice(Math.max(0, slash - 1), slash);
+  if (prefix && !/\s/.test(prefix)) return null;
+  const query = before.slice(slash + 1);
+  if (/[\n\r()[\]{}<>/@]/.test(query) || query.length > 48) return null;
+  return { start: slash, end: cursor, query };
+}
+
 function filteredPlugins() {
   const query = state.pluginQuery.trim().toLowerCase();
   const plugins = state.plugins || [];
@@ -1111,6 +1154,29 @@ function filteredPlugins() {
     .slice(0, 12);
 }
 
+function filteredSkills() {
+  const query = state.skillQuery.trim().toLowerCase();
+  const skills = state.skills || [];
+  if (!query) return skills.slice(0, 12);
+  return skills
+    .map((skill) => {
+      const displayName = String(skill.displayName || skill.name || "").toLowerCase();
+      const source = String(skill.source || "").toLowerCase();
+      const description = String(skill.description || "").toLowerCase();
+      let score = 0;
+      if (displayName === query) score = 100;
+      else if (displayName.startsWith(query)) score = 80;
+      else if (displayName.includes(query)) score = 60;
+      else if (source.includes(query)) score = 30;
+      else if (description.includes(query)) score = 10;
+      return { skill, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || (a.skill.displayName || a.skill.name).localeCompare(b.skill.displayName || b.skill.name, undefined, { sensitivity: "base" }))
+    .map((item) => item.skill)
+    .slice(0, 12);
+}
+
 function closePluginMentionMenu() {
   state.pluginMenuOpen = false;
   state.pluginQuery = "";
@@ -1121,6 +1187,19 @@ function closePluginMentionMenu() {
   if (els.pluginMentionMenu) {
     els.pluginMentionMenu.hidden = true;
     els.pluginMentionMenu.innerHTML = "";
+  }
+}
+
+function closeSkillMentionMenu() {
+  state.skillMenuOpen = false;
+  state.skillQuery = "";
+  state.skillTriggerStart = -1;
+  state.skillActiveIndex = 0;
+  els.skillPickerButton?.setAttribute("aria-expanded", "false");
+  els.skillPickerButton?.classList.remove("active");
+  if (els.skillMentionMenu) {
+    els.skillMentionMenu.hidden = true;
+    els.skillMentionMenu.innerHTML = "";
   }
 }
 
@@ -1140,17 +1219,48 @@ function renderSelectedPlugins() {
     .join("");
 }
 
+function renderSelectedSkills() {
+  if (!els.skillMentionTray) return;
+  els.skillMentionTray.hidden = state.selectedSkills.length === 0;
+  els.skillMentionTray.innerHTML = state.selectedSkills
+    .map(
+      (skill) => `
+        <button class="plugin-chip skill-chip" type="button" data-skill-uri="${escapeHtml(skill.uri)}" title="${escapeHtml(skill.displayName || skill.name)}">
+          <span class="plugin-chip-icon skill-chip-icon fallback">/</span>
+          <span>${escapeHtml(skill.displayName || skill.name)}</span>
+          <small aria-hidden="true">×</small>
+        </button>
+      `
+    )
+    .join("");
+}
+
 function clearSelectedPlugins() {
   state.selectedPlugins = [];
   renderSelectedPlugins();
+}
+
+function clearSelectedSkills() {
+  state.selectedSkills = [];
+  renderSelectedSkills();
 }
 
 function selectedPluginMarkdown() {
   return state.selectedPlugins.map((plugin) => pluginMentionMarkdown(plugin)).filter(Boolean).join(" ");
 }
 
+function selectedSkillPrompt() {
+  const names = state.selectedSkills.map((skill) => skill.displayName || skill.name).filter(Boolean);
+  if (!names.length) return "";
+  return `${names.length === 1 ? "Use skill" : "Use skills"}: ${names.join(", ")}.`;
+}
+
 function composerSendMessage(message) {
-  return [selectedPluginMarkdown(), message.trim()].filter(Boolean).join("\n\n").trim();
+  return [selectedSkillPrompt(), selectedPluginMarkdown(), message.trim()].filter(Boolean).join("\n\n").trim();
+}
+
+function hasComposerPayload() {
+  return Boolean(els.composerInput.value.trim() || state.selectedPlugins.length || state.selectedSkills.length || state.imageAttachments.length);
 }
 
 function renderPluginMentionMenu() {
@@ -1191,6 +1301,44 @@ function renderPluginMentionMenu() {
   `;
 }
 
+function renderSkillMentionMenu() {
+  if (!els.skillMentionMenu || !state.skillMenuOpen) return;
+  if (state.skillsLoading) {
+    els.skillMentionMenu.hidden = false;
+    els.skillMentionMenu.innerHTML = `<div class="plugin-mention-state">${escapeHtml(t("skillPickerLoading"))}</div>`;
+    return;
+  }
+  const skills = filteredSkills();
+  state.skillActiveIndex = Math.max(0, Math.min(state.skillActiveIndex, Math.max(skills.length - 1, 0)));
+  els.skillMentionMenu.hidden = false;
+  if (!skills.length) {
+    els.skillMentionMenu.innerHTML = `<div class="plugin-mention-state">${escapeHtml(t("skillPickerEmpty"))}</div>`;
+    return;
+  }
+  els.skillMentionMenu.innerHTML = `
+    <div class="plugin-mention-heading">${escapeHtml(t("skillPickerTitle"))}</div>
+    ${skills
+      .map((skill, index) => {
+        const active = index === state.skillActiveIndex ? " active" : "";
+        const description = skill.description ? `<span>${escapeHtml(skill.description)}</span>` : `<span>${escapeHtml(skill.source || "")}</span>`;
+        return `
+          <button
+            class="plugin-mention-item skill-mention-item${active}"
+            type="button"
+            role="option"
+            aria-selected="${index === state.skillActiveIndex ? "true" : "false"}"
+            data-skill-index="${index}"
+          >
+            <span class="plugin-mention-icon skill-mention-icon fallback">/</span>
+            <strong>${escapeHtml(skill.displayName || skill.name)}</strong>
+            ${description}
+          </button>
+        `;
+      })
+      .join("")}
+  `;
+}
+
 function updatePluginMentionMenu() {
   if (els.composerInput.disabled) {
     closePluginMentionMenu();
@@ -1208,9 +1356,27 @@ function updatePluginMentionMenu() {
   loadPlugins().catch(() => {});
 }
 
+function updateSkillMentionMenu() {
+  if (els.composerInput.disabled) {
+    closeSkillMentionMenu();
+    return;
+  }
+  const match = skillMentionMatch();
+  if (!match) {
+    closeSkillMentionMenu();
+    return;
+  }
+  state.skillMenuOpen = true;
+  state.skillQuery = match.query;
+  state.skillTriggerStart = match.start;
+  renderSkillMentionMenu();
+  loadSkills().catch(() => {});
+}
+
 function openPluginPickerMenu() {
   if (els.composerInput.disabled) return;
   closeAccountPanel();
+  closeSkillMentionMenu();
   state.pluginMenuOpen = true;
   state.pluginQuery = "";
   state.pluginTriggerStart = -1;
@@ -1219,6 +1385,20 @@ function openPluginPickerMenu() {
   els.pluginPickerButton?.classList.add("active");
   renderPluginMentionMenu();
   loadPlugins().catch(() => {});
+}
+
+function openSkillPickerMenu() {
+  if (els.composerInput.disabled) return;
+  closeAccountPanel();
+  closePluginMentionMenu();
+  state.skillMenuOpen = true;
+  state.skillQuery = "";
+  state.skillTriggerStart = -1;
+  state.skillActiveIndex = 0;
+  els.skillPickerButton?.setAttribute("aria-expanded", "true");
+  els.skillPickerButton?.classList.add("active");
+  renderSkillMentionMenu();
+  loadSkills().catch(() => {});
 }
 
 function insertPluginMention(plugin) {
@@ -1237,6 +1417,7 @@ function insertPluginMention(plugin) {
     renderSelectedPlugins();
   }
   closePluginMentionMenu();
+  renderComposerMode();
   input.focus();
 }
 
@@ -1248,22 +1429,54 @@ function selectActivePluginMention() {
   return true;
 }
 
+function insertSkillMention(skill) {
+  if (!skill?.uri) return;
+  const input = els.composerInput;
+  if (state.skillTriggerStart >= 0) {
+    const cursor = input.selectionStart ?? input.value.length;
+    const separator = input.value.slice(cursor).startsWith(" ") || cursor === input.value.length ? "" : " ";
+    const nextValue = `${input.value.slice(0, state.skillTriggerStart)}${separator}${input.value.slice(cursor)}`;
+    const nextCursor = state.skillTriggerStart + separator.length;
+    input.value = nextValue;
+    input.setSelectionRange(nextCursor, nextCursor);
+  }
+  if (!state.selectedSkills.some((item) => item.uri === skill.uri)) {
+    state.selectedSkills.push(skill);
+    renderSelectedSkills();
+  }
+  closeSkillMentionMenu();
+  renderComposerMode();
+  input.focus();
+}
+
+function selectActiveSkillMention() {
+  if (!state.skillMenuOpen || state.skillsLoading) return false;
+  const skill = filteredSkills()[state.skillActiveIndex];
+  if (!skill) return false;
+  insertSkillMention(skill);
+  return true;
+}
+
 function renderComposerMode() {
   const allowWrite = Boolean(state.config?.allowWrite);
   const thinking = Boolean(state.threadStatus?.thinking);
   const hasTarget = Boolean(state.selectedId);
+  const canSend = allowWrite && hasTarget && !state.composerBusy && (thinking || hasComposerPayload());
   els.composerInput.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.attachButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.pluginPickerButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
-  els.sendButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
+  els.skillPickerButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
+  els.sendButton.disabled = !canSend;
   els.sendButton.classList.toggle("stop-mode", allowWrite && thinking);
-  els.sendButton.textContent = allowWrite && thinking ? "■" : t("send");
   els.sendButton.setAttribute("aria-label", allowWrite && thinking ? t("stopCurrentTask") : t("send"));
   els.sendButton.setAttribute("title", allowWrite && thinking ? t("stopCurrentTask") : t("send"));
   els.composerInput.placeholder = allowWrite ? (state.selectedId === DRAFT_THREAD_ID ? t("newConversationReady") : t("sendToCodex")) : t("readonlyPlaceholder");
   if (!allowWrite) els.sendStatus.textContent = t("readonly");
   else if (els.sendStatus.textContent === t("readonly")) els.sendStatus.textContent = "";
-  if (els.composerInput.disabled) closePluginMentionMenu();
+  if (els.composerInput.disabled) {
+    closePluginMentionMenu();
+    closeSkillMentionMenu();
+  }
 }
 
 async function loadConfig() {
@@ -1290,8 +1503,13 @@ function applyHomeContext(data) {
   state.plugins = [];
   state.pluginsLoaded = false;
   state.pluginsLoading = false;
+  state.skills = [];
+  state.skillsLoaded = false;
+  state.skillsLoading = false;
   clearSelectedPlugins();
+  clearSelectedSkills();
   closePluginMentionMenu();
+  closeSkillMentionMenu();
   els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("loading"))}</div>`;
   return true;
 }
@@ -1522,10 +1740,6 @@ els.toolToggle.addEventListener("change", (event) => {
   loadMessages(true);
 });
 
-els.lockButton.addEventListener("click", () => {
-  lockApp(t("lockedAgain"));
-});
-
 els.accountSummary.addEventListener("click", () => {
   state.accountExpanded = !state.accountExpanded;
   renderAccount();
@@ -1541,6 +1755,15 @@ els.pluginPickerButton.addEventListener("click", () => {
   openPluginPickerMenu();
 });
 
+els.skillPickerButton.addEventListener("click", () => {
+  if (els.skillPickerButton.disabled) return;
+  if (state.skillMenuOpen && state.skillTriggerStart < 0) {
+    closeSkillMentionMenu();
+    return;
+  }
+  openSkillPickerMenu();
+});
+
 document.addEventListener("click", (event) => {
   if (state.accountExpanded && !els.accountPanel.contains(event.target) && !els.accountSummary.contains(event.target)) {
     closeAccountPanel();
@@ -1552,6 +1775,14 @@ document.addEventListener("click", (event) => {
     !els.pluginPickerButton.contains(event.target)
   ) {
     closePluginMentionMenu();
+  }
+  if (
+    state.skillMenuOpen &&
+    !els.skillMentionMenu?.contains(event.target) &&
+    !els.composerInput.contains(event.target) &&
+    !els.skillPickerButton.contains(event.target)
+  ) {
+    closeSkillMentionMenu();
   }
 });
 
@@ -1618,6 +1849,29 @@ els.composerInput.addEventListener("keydown", (event) => {
       return;
     }
   }
+  if (state.skillMenuOpen) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const count = filteredSkills().length;
+      if (count) {
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        state.skillActiveIndex = (state.skillActiveIndex + delta + count) % count;
+        renderSkillMentionMenu();
+      }
+      return;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      if (selectActiveSkillMention()) {
+        event.preventDefault();
+        return;
+      }
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSkillMentionMenu();
+      return;
+    }
+  }
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     els.composerForm.requestSubmit();
@@ -1626,23 +1880,35 @@ els.composerInput.addEventListener("keydown", (event) => {
 
 els.composerInput.addEventListener("input", () => {
   state.pluginActiveIndex = 0;
+  state.skillActiveIndex = 0;
   updatePluginMentionMenu();
+  updateSkillMentionMenu();
+  renderComposerMode();
 });
 
 els.composerInput.addEventListener("click", () => {
   updatePluginMentionMenu();
+  updateSkillMentionMenu();
 });
 
 els.composerInput.addEventListener("blur", () => {
   window.setTimeout(() => {
     if (state.pluginMenuOpen && state.pluginTriggerStart < 0) return;
+    if (state.skillMenuOpen && state.skillTriggerStart < 0) return;
     if (!els.pluginMentionMenu?.contains(document.activeElement) && !els.pluginPickerButton.contains(document.activeElement)) {
       closePluginMentionMenu();
+    }
+    if (!els.skillMentionMenu?.contains(document.activeElement) && !els.skillPickerButton.contains(document.activeElement)) {
+      closeSkillMentionMenu();
     }
   }, 120);
 });
 
 els.pluginMentionMenu?.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+});
+
+els.skillMentionMenu?.addEventListener("mousedown", (event) => {
   event.preventDefault();
 });
 
@@ -1653,11 +1919,28 @@ els.pluginMentionMenu?.addEventListener("click", (event) => {
   insertPluginMention(plugin);
 });
 
+els.skillMentionMenu?.addEventListener("click", (event) => {
+  const button = event.target.closest(".skill-mention-item");
+  if (!button) return;
+  const skill = filteredSkills()[Number(button.dataset.skillIndex)];
+  insertSkillMention(skill);
+});
+
 els.pluginMentionTray?.addEventListener("click", (event) => {
   const button = event.target.closest(".plugin-chip");
   if (!button) return;
   state.selectedPlugins = state.selectedPlugins.filter((plugin) => plugin.uri !== button.dataset.pluginUri);
   renderSelectedPlugins();
+  renderComposerMode();
+  els.composerInput.focus();
+});
+
+els.skillMentionTray?.addEventListener("click", (event) => {
+  const button = event.target.closest(".skill-chip");
+  if (!button) return;
+  state.selectedSkills = state.selectedSkills.filter((skill) => skill.uri !== button.dataset.skillUri);
+  renderSelectedSkills();
+  renderComposerMode();
   els.composerInput.focus();
 });
 
@@ -1715,6 +1998,7 @@ els.composerForm.addEventListener("submit", async (event) => {
       });
       els.composerInput.value = "";
       clearSelectedPlugins();
+      clearSelectedSkills();
       state.imageAttachments = [];
       renderImageAttachments();
       if (isDraftThread && result.threadId) {

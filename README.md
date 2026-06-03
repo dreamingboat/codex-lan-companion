@@ -1,8 +1,10 @@
 # Codex LAN Companion
 
-Codex LAN Companion is a small self-hosted web service for viewing and lightly controlling Codex Desktop from another device on the same LAN. It is designed for local/home-network use: start it on your Mac, scan the terminal QR code, and open the companion UI from your phone or tablet browser.
+[中文说明](README.zh-CN.md)
 
-This is an unofficial tool. It reads local Codex Desktop state and uses local Codex Desktop IPC only when write mode is explicitly enabled.
+Codex LAN Companion is a small self-hosted web service for viewing and lightly controlling Codex Desktop from another device on the same LAN. It is designed for local/home-network use: start it on the Mac that runs Codex Desktop, then open the companion UI from any browser device on the same network: phone, tablet, Windows PC, Linux laptop, smart display, Kindle/e-reader, or anything else with a usable web browser.
+
+This is an unofficial tool. It reads local Codex Desktop state and, by default, can use local Codex Desktop IPC to send messages from the LAN web UI. Start with `--readonly` if you only want to view conversations.
 
 ## First Release Notice
 
@@ -13,18 +15,20 @@ Important compatibility note: this first release was developed and verified only
 ## Features
 
 - LAN browser UI for Codex Desktop conversations
+- Browser-device access across the LAN: macOS, Windows, Linux, phones, tablets, Kindle/e-readers, smart displays, and more
 - Mobile-friendly conversation list and message view
 - Live-ish sync, including an active "thinking" indicator
 - Account and local plan-usage summary when available from Codex local state
 - Plugin picker in the composer, including friendly plugin chips
-- Image attachments in write mode
+- Skill picker in the composer, including `/` trigger and friendly skill chips
+- Image attachments when writable
 - Approval and important notice display when detectable from Codex Desktop events
 - New conversation creation from the web UI
 - Access-code protected API by default
 - Friendly access-code prompt in the browser
-- Read-only by default
-- Optional `--write` mode for sending messages back to Codex Desktop
-- Terminal QR code for opening the LAN URL and signing in on a phone or tablet
+- Writable by default for sending messages back to Codex Desktop
+- Optional `--readonly` mode for view-only use
+- Terminal QR code sign-in for browser devices
 
 ## Install
 
@@ -34,7 +38,7 @@ Prerequisites:
 
 1. Install Codex Desktop on your Mac and sign in.
 2. Install Node.js 18 or newer.
-3. Put your Mac and phone/tablet on the same Wi-Fi network.
+3. Put your Mac and the browser device you want to use on the same Wi-Fi network.
 
 Run without installing globally:
 
@@ -49,18 +53,12 @@ npm install -g codex-lan-companion
 codex-lan-companion
 ```
 
-The terminal prints a local URL, a LAN URL, a short numeric access code, and a QR code. Scanning the QR code opens the LAN web page and signs in automatically. If you open the LAN URL manually instead, enter the access code shown in the terminal.
+The terminal prints a local URL, a LAN URL, a short numeric access code, and a QR code. Scan the QR code from a phone/tablet to open the LAN web page and sign in automatically, or open the LAN URL manually from any browser device and enter the access code shown in the terminal.
 
-For convenience, while the service is running you can type this in the same terminal to print the sign-in QR code again:
-
-```text
-qr
-```
-
-Default mode is read-only. To send messages from the web UI back to Codex Desktop, start with:
+Default mode allows sending messages from the web UI back to Codex Desktop. To view conversations only, start with:
 
 ```bash
-codex-lan-companion --write
+codex-lan-companion --readonly
 ```
 
 ### From Source
@@ -74,7 +72,7 @@ npm start
 
 ## Usage
 
-Default mode is read-only and access-code protected:
+Default mode is writable and access-code protected:
 
 ```bash
 codex-lan-companion
@@ -87,18 +85,35 @@ Codex LAN Companion is running
 Local:  http://127.0.0.1:8787/
 LAN:    http://10.0.0.131:8787/
 Access code: 482913
-Mode:   read-only · access-code protected
+Mode:   write enabled · access-code protected
+Type:   qr + Enter to print the sign-in QR code again
+
+QR:     opens the LAN page and signs in automatically
 ```
 
-Open the LAN URL from a phone or tablet on the same Wi-Fi, or scan the terminal QR code to open and sign in automatically. When no password is provided, the service generates a short 6-digit numeric code each time it starts. The QR code contains a temporary sign-in URL for the current launch; after the browser opens it, the page removes the login parameter from the address bar. By default the code is kept only in page memory, so reloading or reopening the page asks again. Check "Remember this device" on the login screen if you want the browser to keep it across restarts.
+Open the LAN URL from any browser device on the same Wi-Fi, or scan the terminal QR code from a camera-capable device to open and sign in automatically. When no password is provided, the service generates a short 6-digit numeric code each time it starts. The QR code contains a temporary sign-in URL for the current launch; after the browser opens it, the page removes the login parameter from the address bar. By default the code is kept only in page memory, so reloading or reopening the page asks again. Check "Remember this device" on the login screen if you want the browser to keep it across restarts.
 
-Enable web-to-Codex input:
+## QR Code Sign-In / 手机扫码登录
+
+Codex LAN Companion prints a QR code in the terminal when it starts. The QR code contains the LAN URL plus a temporary sign-in parameter for the current service launch.
+
+Scan the QR code from a phone, tablet, or other camera-capable device on the same Wi-Fi network to open the web UI and sign in automatically. Devices without a camera can open the LAN URL manually and enter the access code.
+
+If the terminal output has scrolled away, type `qr` in the same terminal and press Enter to print the sign-in QR code again:
+
+```text
+qr
+```
+
+The QR code is equivalent to the current access code. Do not share terminal screenshots or QR codes with people you do not trust.
+
+Use view-only mode:
 
 ```bash
-codex-lan-companion --write
+codex-lan-companion --readonly
 ```
 
-Write mode lets the web UI send text, selected plugin mentions, and supported image attachments to the active Codex Desktop conversation through local Desktop IPC. Codex Desktop should be open and signed in on the Mac running this service.
+By default, the web UI can send text, selected plugin or skill mentions, and supported image attachments to Codex Desktop through local Desktop IPC. Codex Desktop should be open and signed in on the Mac running this service. `--readonly` disables sending, interruption, and approval actions from the browser.
 
 Choose a port or fixed token:
 
@@ -121,8 +136,7 @@ codex-lan-companion --no-auth
 --port <port>          Bind port. Default: 8787
 --password <password>  Friendly access code. Default: generated 6-digit code per launch
 --token <token>        Alias for --password
---write                Enable sending messages to Codex Desktop
---readonly             Force read-only mode. Default
+--readonly             Disable sending messages to Codex Desktop
 --no-auth              Disable access-code guard
 --codex-home <path>    Codex data directory. Default: ~/.codex
 --ipc-socket <path>    Codex Desktop IPC socket override
@@ -132,7 +146,7 @@ codex-lan-companion --no-auth
 Environment variables are also supported:
 
 ```bash
-PORT=8790 HOST=0.0.0.0 CODEX_LAN_PASSWORD=home-only CODEX_LAN_ALLOW_WRITE=1 codex-lan-companion
+PORT=8790 HOST=0.0.0.0 CODEX_LAN_PASSWORD=home-only codex-lan-companion
 ```
 
 ## Requirements
@@ -140,10 +154,10 @@ PORT=8790 HOST=0.0.0.0 CODEX_LAN_PASSWORD=home-only CODEX_LAN_ALLOW_WRITE=1 code
 - macOS
 - Codex Desktop installed and logged in
 - Node.js 18+
-- Phone and Mac on the same LAN
+- Mac and browser device on the same LAN
 - `sqlite3` available on the Mac
 
-Write mode additionally requires Codex Desktop to be running with the target conversation available to the desktop app.
+Sending from the browser requires Codex Desktop to be running with the target conversation available to the desktop app.
 
 Validated environment for the first release:
 
@@ -178,7 +192,7 @@ This service exposes local Codex conversation titles, messages, tool output, pro
 Recommended defaults:
 
 - Keep access-code auth enabled.
-- Keep read-only mode unless you need phone input.
+- Use `--readonly` when you only need to view conversations.
 - Do not expose the port to the public internet.
 - Do not share terminal screenshots or QR codes with people you do not trust.
 - Use a fixed access code only if you can keep it private.

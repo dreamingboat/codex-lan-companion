@@ -25,7 +25,6 @@ function parseCliArgs(argv) {
     else if (flag === "--password") options.password = nextValue();
     else if (flag === "--codex-home") options.codexHome = nextValue();
     else if (flag === "--ipc-socket") options.ipcSocket = nextValue();
-    else if (flag === "--write") options.write = true;
     else if (flag === "--readonly") options.readonly = true;
     else if (flag === "--no-auth") options.noAuth = true;
     else if (arg) {
@@ -48,8 +47,7 @@ Options:
   --port <port>          Bind port. Default: 8787
   --password <password>  Friendly access code. Default: generated 6-digit code per launch
   --token <token>        Alias for --password
-  --write                Enable sending messages to Codex Desktop
-  --readonly             Force read-only mode. Default
+  --readonly             Disable sending messages to Codex Desktop
   --no-auth              Disable access-code guard
   --codex-home <path>    Codex data directory. Default: ~/.codex
   --ipc-socket <path>    Codex Desktop IPC socket override
@@ -57,7 +55,7 @@ Options:
 
 Examples:
   codex-lan-companion
-  codex-lan-companion --write
+  codex-lan-companion --readonly
   codex-lan-companion --port 8790 --password home-only
 `);
 }
@@ -74,7 +72,7 @@ const HOST = cli.host || process.env.HOST || "0.0.0.0";
 const PORT = Number(cli.port || process.env.PORT || 8787);
 const AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
 const ACCESS_TOKEN = cli.password || cli.token || process.env.CODEX_LAN_PASSWORD || process.env.CODEX_LAN_TOKEN || String(randomInt(100000, 1000000));
-const ALLOW_WRITE = cli.readonly ? false : Boolean(cli.write || process.env.CODEX_LAN_ALLOW_WRITE === "1" || process.env.CODEX_ALLOW_WRITE === "1");
+const ALLOW_WRITE = !cli.readonly && process.env.CODEX_LAN_READONLY !== "1";
 const CODEX_IPC_SOCKET =
   cli.ipcSocket ||
   process.env.CODEX_IPC_SOCKET ||
@@ -206,6 +204,26 @@ async function findPluginManifests(dir, depth = 0) {
   return manifests;
 }
 
+async function findSkillFiles(dir, depth = 0) {
+  if (depth > 8) return [];
+  let entries = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files = [];
+  for (const entry of entries) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isFile() && entry.name === "SKILL.md") {
+      files.push(entryPath);
+    } else if (entry.isDirectory() && entry.name !== "node_modules" && entry.name !== ".git") {
+      files.push(...(await findSkillFiles(entryPath, depth + 1)));
+    }
+  }
+  return files;
+}
+
 function pluginMarketplaceFromManifest(manifestPath, cacheRoot) {
   const relative = path.relative(cacheRoot, manifestPath);
   const [marketplace] = relative.split(path.sep);
@@ -219,6 +237,54 @@ function compactPluginDescription(value) {
     .find(Boolean);
   if (!firstLine) return "";
   return firstLine.length > 180 ? `${firstLine.slice(0, 177)}...` : firstLine;
+}
+
+function parseSkillMetadata(raw, fallbackName) {
+  const text = String(raw || "");
+  const frontmatter = text.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/);
+  const meta = {};
+  if (frontmatter) {
+    for (const line of frontmatter[1].split(/\r?\n/)) {
+      const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+      if (!match) continue;
+      const value = match[2].trim().replace(/^["']|["']$/g, "");
+      meta[match[1]] = value;
+    }
+  }
+  const body = frontmatter ? text.slice(frontmatter[0].length) : text;
+  const description =
+    meta.description ||
+    body
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith("#")) ||
+    "";
+  return {
+    name: String(meta.name || fallbackName || "").trim(),
+    description: compactPluginDescription(description)
+  };
+}
+
+function skillSourceInfo(skillPath, home) {
+  const skillsRoot = path.join(home, "skills");
+  const pluginCacheRoot = path.join(home, "plugins", "cache");
+  const relativeLocal = path.relative(skillsRoot, skillPath);
+  if (relativeLocal && !relativeLocal.startsWith("..") && !path.isAbsolute(relativeLocal)) {
+    const [scope] = relativeLocal.split(path.sep);
+    return {
+      key: scope === ".system" ? "system" : "local",
+      label: scope === ".system" ? "System" : "Local"
+    };
+  }
+  const relativePlugin = path.relative(pluginCacheRoot, skillPath);
+  if (relativePlugin && !relativePlugin.startsWith("..") && !path.isAbsolute(relativePlugin)) {
+    const [marketplace, pluginName] = relativePlugin.split(path.sep);
+    return {
+      key: `plugin:${marketplace}:${pluginName}`,
+      label: [marketplace, pluginName].filter(Boolean).join("/")
+    };
+  }
+  return { key: "unknown", label: "Unknown" };
 }
 
 function mimeTypeForAsset(filePath) {
@@ -297,6 +363,39 @@ async function getPlugins() {
   const plugins = [...byUri.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" }));
   return {
     plugins,
+    codexHome: homeState.home,
+    codexHomeVersion: homeState.version
+  };
+}
+
+async function getSkills() {
+  const homeState = await refreshCodexHomeContext({ source: "skills" });
+  const roots = [path.join(homeState.home, "skills"), path.join(homeState.home, "plugins", "cache")];
+  const files = [];
+  for (const root of roots) files.push(...(await findSkillFiles(root)));
+  const byUri = new Map();
+  for (const skillPath of files) {
+    try {
+      const raw = await fs.readFile(skillPath, "utf8");
+      const fallbackName = path.basename(path.dirname(skillPath));
+      const metadata = parseSkillMetadata(raw, fallbackName);
+      if (!metadata.name) continue;
+      const source = skillSourceInfo(skillPath, homeState.home);
+      const uri = `skill://${encodeURIComponent(metadata.name)}@${encodeURIComponent(source.key)}`;
+      byUri.set(uri, {
+        name: metadata.name,
+        displayName: metadata.name,
+        description: metadata.description,
+        source: source.label,
+        uri
+      });
+    } catch {
+      // Ignore stale or partially installed skill entries.
+    }
+  }
+  const skills = [...byUri.values()].sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" }));
+  return {
+    skills,
     codexHome: homeState.home,
     codexHomeVersion: homeState.version
   };
@@ -2157,7 +2256,7 @@ function webpDimensions(bytes) {
 async function sendToCodex(text, threadId, images = [], { newThread = false } = {}) {
   await refreshCodexHomeContext({ source: "send" });
   if (!ALLOW_WRITE) {
-    const err = new Error("Write mode is disabled. Restart with --write to send messages to Codex Desktop.");
+    const err = new Error("Read-only mode is enabled. Restart without --readonly to send messages to Codex Desktop.");
     err.status = 403;
     throw err;
   }
@@ -2397,7 +2496,7 @@ function isNoOpenOwnerError(error) {
 
 async function interruptCodex(threadId) {
   if (!ALLOW_WRITE) {
-    const err = new Error("Write mode is disabled. Restart with --write to control Codex Desktop.");
+    const err = new Error("Read-only mode is enabled. Restart without --readonly to control Codex Desktop.");
     err.status = 403;
     throw err;
   }
@@ -2575,7 +2674,7 @@ function findLiveApprovalRequest(threadId, fallbackRequestId) {
 
 async function respondToApproval({ threadId, requestId, decision, approvalKind } = {}) {
   if (!ALLOW_WRITE) {
-    const err = new Error("Write mode is disabled. Restart with --write to control Codex Desktop.");
+    const err = new Error("Read-only mode is enabled. Restart without --readonly to control Codex Desktop.");
     err.status = 403;
     throw err;
   }
@@ -2745,6 +2844,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/plugins") {
       if (!requireAuthorized(req, res, url)) return;
       sendJson(res, 200, await getPlugins());
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/skills") {
+      if (!requireAuthorized(req, res, url)) return;
+      sendJson(res, 200, await getSkills());
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/threads") {

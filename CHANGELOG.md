@@ -7,8 +7,8 @@ Initial public release.
 - View Codex Desktop conversations from another device on the same LAN.
 - Mobile-friendly conversation list, drawer behavior, and message view.
 - Near-real-time conversation refresh with thinking/status indicators.
-- Optional write mode for sending messages from the web UI to Codex Desktop.
-- Plugin picker, image attachments, interruption support, and approval display where detectable.
+- Writable by default for sending messages from the web UI to Codex Desktop, with optional `--readonly` mode.
+- Plugin picker, skill picker, image attachments, interruption support, and approval display where detectable.
 - Account and local plan-usage display when available from Codex local state.
 - Short 6-digit access code and terminal QR sign-in for local browser access.
 

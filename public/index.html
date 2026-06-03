@@ -67,7 +67,6 @@
                 <path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"></path>
               </svg>
             </button>
-            <button id="lockButton" class="icon-button" type="button" title="已锁定" aria-label="已锁定">🔒</button>
           </div>
         </header>
         <div id="messageList" class="message-list">
@@ -75,6 +74,7 @@
         </div>
         <form id="composerForm" class="composer">
           <div id="pluginMentionTray" class="plugin-mention-tray" hidden></div>
+          <div id="skillMentionTray" class="plugin-mention-tray skill-mention-tray" hidden></div>
           <textarea
             id="composerInput"
             class="composer-input"
@@ -83,6 +83,7 @@
             autocomplete="off"
           ></textarea>
           <div id="pluginMentionMenu" class="plugin-mention-menu" role="listbox" hidden></div>
+          <div id="skillMentionMenu" class="plugin-mention-menu skill-mention-menu" role="listbox" hidden></div>
           <input id="imageInput" type="file" accept="image/*" multiple hidden />
           <div id="attachmentTray" class="attachment-tray" hidden></div>
           <div class="composer-actions">
@@ -115,11 +116,28 @@
                   </span>
                   <span class="plugin-picker-label">插件</span>
                 </button>
+                <button
+                  id="skillPickerButton"
+                  class="plugin-picker-button skill-picker-button"
+                  type="button"
+                  title="引用技能"
+                  aria-label="引用技能"
+                  aria-expanded="false"
+                >
+                  <span class="skill-picker-icon" aria-hidden="true">/</span>
+                  <span class="plugin-picker-label">技能</span>
+                </button>
               </div>
             </div>
             <div class="composer-buttons">
               <button id="attachButton" class="icon-button attach-button" type="button" title="添加图片" aria-label="添加图片">+</button>
-              <button id="sendButton" class="send-button" type="submit">发送</button>
+              <button id="sendButton" class="send-button" type="submit" title="发送" aria-label="发送">
+                <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 19V5"></path>
+                  <path d="m6 11 6-6 6 6"></path>
+                </svg>
+                <span class="send-stop-icon" aria-hidden="true"></span>
+              </button>
             </div>
           </div>
           <span id="sendStatus" class="send-status" aria-live="polite"></span>
