@@ -2,9 +2,25 @@
 
 [中文说明](README.zh-CN.md)
 
+![Codex LAN Companion promotional image](docs/assets/promo.png)
+
+**Control Codex Desktop from any browser device on your local network.**
+
 Codex LAN Companion is a small self-hosted web service for viewing and lightly controlling Codex Desktop from another device on the same LAN. It is designed for local/home-network use: start it on the Mac that runs Codex Desktop, then open the companion UI from any browser device on the same network: phone, tablet, Windows PC, Linux laptop, smart display, Kindle/e-reader, or anything else with a usable web browser.
 
 This is an unofficial tool. It reads local Codex Desktop state and, by default, can use local Codex Desktop IPC to send messages from the LAN web UI. Start with `--readonly` if you only want to view conversations.
+
+## Why
+
+Codex Desktop is powerful, but long-running tasks can keep you tied to the Mac. Codex LAN Companion gives desktop Codex a lightweight LAN remote: check progress from the couch, continue a prompt from a tablet, or approve a permission request from your phone without installing a client app.
+
+## At a Glance
+
+- **Local-first:** runs on your Mac and stays inside your LAN
+- **Browser-based:** works from phones, tablets, laptops, e-readers, and other browser devices
+- **Remote control:** send prompts, interrupt tasks, create conversations, and handle approval cards
+- **Workflow-aware:** shows thinking state, account/usage information, plugin picker, and skill picker
+- **Easy onboarding:** terminal access code plus QR sign-in
 
 ## First Release Notice
 

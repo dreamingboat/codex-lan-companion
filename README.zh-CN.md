@@ -2,9 +2,25 @@
 
 [English](README.md)
 
+![Codex LAN Companion 宣传图](docs/assets/promo.png)
+
+**在同一局域网内，用任意浏览器设备控制 Codex Desktop。**
+
 Codex LAN Companion 是一个运行在本地的自托管 Web 服务，用来在同一局域网内从其他设备查看并轻量控制 Codex Desktop。它面向家庭或可信局域网使用：在运行 Codex Desktop 的 Mac 上启动服务，然后用同一网络里的任意浏览器设备访问，包括手机、平板、Windows PC、Linux 笔记本、智能屏、Kindle/电子书阅读器，或者任何有可用浏览器的设备。
 
 这是一个非官方工具。它会读取本地 Codex Desktop 状态；默认情况下，也可以通过本地 Codex Desktop IPC 从网页端向 Codex 发送消息。如果只想查看对话，请用 `--readonly` 启动。
+
+## 为什么做它
+
+Codex Desktop 很强，但任务跑起来之后，人经常会被拴在 Mac 前面。Codex LAN Companion 更像是给桌面版 Codex 加了一个轻量的局域网遥控器：你可以在沙发上看进度，用平板继续输入 prompt，或者在手机上处理权限审批，不需要安装客户端 app。
+
+## 一眼看懂
+
+- **本地优先：** 服务运行在你的 Mac 上，只在局域网内使用
+- **浏览器访问：** 手机、平板、笔记本、电子书设备等都能用
+- **远程控制：** 发送 prompt、中断任务、新建对话、处理审批卡片
+- **贴近 Codex 工作流：** 显示思考状态、账号/用量、插件选择和技能选择
+- **启动简单：** 终端访问码 + 二维码扫码登录
 
 ## 首个发布版本提示
 
