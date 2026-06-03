@@ -1538,6 +1538,7 @@ function redactLargePayloads(value, depth = 0) {
 }
 
 function isInteractionPayload(payload) {
+  if (isApprovalDecisionPayload(payload)) return false;
   const toolArguments = parseMaybeJsonObject(payload?.arguments);
   const params = payload?.params || payload?.payload || {};
   if (
@@ -1562,6 +1563,19 @@ function isInteractionPayload(payload) {
     .join(" ")
     .toLowerCase();
   return INTERACTION_TYPE_PATTERNS.some((pattern) => text.includes(pattern));
+}
+
+function isApprovalDecisionPayload(payload) {
+  const method = String(payload?.method || payload?.name || payload?.type || "").toLowerCase();
+  const params = payload?.params || payload?.payload || {};
+  return (
+    payload?.direction === "outgoing-request" ||
+    method.includes("approval-decision") ||
+    method.includes("approval_decision") ||
+    method.includes("approval-response") ||
+    method.includes("approval_response") ||
+    ((params?.decision || params?.response) && method.includes("approval"))
+  );
 }
 
 function interactionTitle(payload) {
@@ -1739,6 +1753,66 @@ function messageFromInteractionEvent(timestamp, payload, meta = {}) {
     content: interactionContent(payload),
     requiresDesktopAction: true
   };
+}
+
+function normalizeApprovalCommandForKey(command) {
+  const text = String(command || "").trim();
+  const shellMatch = text.match(/^\/bin\/(?:zsh|bash|sh)\s+-lc\s+["']([\s\S]+)["']$/);
+  if (!shellMatch) return text.replace(/\s+/g, " ");
+  return shellMatch[1].replace(/\\"/g, "\"").replace(/\\'/g, "'").replace(/\s+/g, " ").trim();
+}
+
+function interactionContentField(content, label) {
+  const match = String(content || "").match(new RegExp(`(?:^|\\n)${label}:\\s*([^\\n]+)`, "i"));
+  return match?.[1]?.trim() || "";
+}
+
+function interactionDedupeKey(message) {
+  if (message?.role !== "interaction") return "";
+  const prompt = interactionContentField(message.content, "Prompt");
+  const command = normalizeApprovalCommandForKey(interactionContentField(message.content, "Command"));
+  const workdir = interactionContentField(message.content, "Workdir");
+  const pathValue = interactionContentField(message.content, "Path");
+  const content = String(message.content || "").replace(/\s+/g, " ").trim();
+  return [message.approvalKind || "", prompt || content, command, pathValue, workdir].join("\n");
+}
+
+function preferredInteractionMessage(existing, candidate) {
+  const existingIsLive = existing?.source === "desktop-ipc";
+  const candidateIsLive = candidate?.source === "desktop-ipc";
+  const display = String(candidate?.content || "").length < String(existing?.content || "").length ? candidate : existing;
+  const live = candidateIsLive ? candidate : existingIsLive ? existing : null;
+  if (!live) return display;
+  return {
+    ...display,
+    source: live.source,
+    requestId: live.requestId || display.requestId,
+    approvalKind: live.approvalKind || display.approvalKind,
+    canApprove: live.canApprove || display.canApprove,
+    requiresDesktopAction: Boolean(live.requiresDesktopAction || display.requiresDesktopAction),
+    lineNumber: Math.min(existing.lineNumber || candidate.lineNumber || 0, candidate.lineNumber || existing.lineNumber || 0),
+    timestamp: display.timestamp || live.timestamp
+  };
+}
+
+function dedupeInteractionMessages(messages) {
+  const byKey = new Map();
+  const result = [];
+  for (const message of messages) {
+    const key = interactionDedupeKey(message);
+    if (!key) {
+      result.push(message);
+      continue;
+    }
+    const existingIndex = byKey.get(key);
+    if (existingIndex === undefined) {
+      byKey.set(key, result.length);
+      result.push(message);
+      continue;
+    }
+    result[existingIndex] = preferredInteractionMessage(result[existingIndex], message);
+  }
+  return result;
 }
 
 const NOTICE_TYPE_PATTERNS = [
@@ -2019,7 +2093,11 @@ async function parseRollout(filePath) {
         continue;
       }
       if (entry.type === "response_item") {
-        const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload);
+        const messageMeta = {
+          turnId: activeTurn?.turnId || null,
+          turnStartedAtMs: activeTurn?.startedAtMs || null
+        };
+        const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
         if (hasDisplayableMessageContent(interaction)) {
           interactionMessages.push({ ...interaction, lineNumber });
           continue;
@@ -2071,7 +2149,7 @@ async function parseRollout(filePath) {
       staleTurnId: activeTurnStale ? activeTurn?.turnId || null : null,
       staleTurnLastUpdatedAtMs: activeTurnStale ? activeTurnLastUpdatedAtMs : null
     },
-    messages: [...chatMessages, ...pendingInteractions, ...noticeMessages, ...toolMessages].sort((a, b) => {
+    messages: dedupeInteractionMessages([...chatMessages, ...pendingInteractions, ...noticeMessages, ...toolMessages]).sort((a, b) => {
       if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
       return a.lineNumber - b.lineNumber;
     })
@@ -2108,7 +2186,7 @@ async function getMessages(id) {
         interactionRequired: ipcInteractions.some((message) => message.requiresDesktopAction),
         possibleDesktopAttention: false
       },
-      messages: liveMessages.sort((a, b) => {
+      messages: dedupeInteractionMessages(liveMessages).sort((a, b) => {
         if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
         return a.lineNumber - b.lineNumber;
       })
@@ -2123,7 +2201,7 @@ async function getMessages(id) {
       ...parsed.status,
       interactionRequired: parsed.status?.interactionRequired || ipcInteractions.some((message) => message.requiresDesktopAction)
     },
-    messages: [...parsed.messages, ...liveMessages].sort((a, b) => {
+    messages: dedupeInteractionMessages([...parsed.messages, ...liveMessages]).sort((a, b) => {
       if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
       return a.lineNumber - b.lineNumber;
     })
