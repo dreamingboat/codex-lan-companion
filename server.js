@@ -70,7 +70,7 @@ const INITIAL_CODEX_HOME = cli.codexHome || process.env.CODEX_HOME || path.join(
 const CODEX_HOME_FIXED = Boolean(cli.codexHome || process.env.CODEX_LAN_FIXED_CODEX_HOME === "1");
 const HOST = cli.host || process.env.HOST || "0.0.0.0";
 const PORT = Number(cli.port || process.env.PORT || 8787);
-const AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
+let AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
 const ACCESS_TOKEN = cli.password || cli.token || process.env.CODEX_LAN_PASSWORD || process.env.CODEX_LAN_TOKEN || String(randomInt(100000, 1000000));
 const ALLOW_WRITE = !cli.readonly && process.env.CODEX_LAN_READONLY !== "1";
 const CODEX_IPC_SOCKET =
@@ -89,6 +89,8 @@ const MIN_SEND_IMAGE_EDGE = 16;
 const MAX_SEND_IMAGE_EDGE = 4096;
 const MAX_SEND_IMAGE_PIXELS = 12_000_000;
 const SUPPORTED_SEND_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const ACTIVE_TURN_STALE_MS = 10 * 60 * 1000;
+const ACTIVE_STATUS_CACHE_MS = 5000;
 const IPC_VERSION_BY_METHOD = {
   "thread-follower-start-turn": 1,
   "thread-follower-interrupt-turn": 1,
@@ -1945,7 +1947,9 @@ async function parseRollout(filePath) {
   const stat = await fs.stat(filePath);
   const signature = `${stat.size}:${stat.mtimeMs}`;
   const cached = messageCache.get(filePath);
-  if (cached?.signature === signature) return cached.result;
+  const nowMs = Date.now();
+  const cachedAgeMs = nowMs - (cached?.cachedAtMs || 0);
+  if (cached?.signature === signature && (!cached.result?.status?.thinking || cachedAgeMs < ACTIVE_STATUS_CACHE_MS)) return cached.result;
 
   const eventMessages = [];
   const fallbackMessages = [];
@@ -1955,6 +1959,7 @@ async function parseRollout(filePath) {
   let meta = {};
   let lineNumber = 0;
   let activeTurn = null;
+  let lastEntryAtMs = Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : nowMs;
   const assistantMessagesByTurn = new Map();
 
   const stream = createReadStream(filePath, { encoding: "utf8" });
@@ -1965,6 +1970,8 @@ async function parseRollout(filePath) {
     if (!line.trim()) continue;
     try {
       const entry = JSON.parse(line);
+      const entryAtMs = Date.parse(entry.timestamp);
+      if (Number.isFinite(entryAtMs)) lastEntryAtMs = entryAtMs;
       if (entry.type === "session_meta") {
         meta = { ...meta, ...(entry.payload || {}) };
         continue;
@@ -2039,22 +2046,30 @@ async function parseRollout(filePath) {
   }
 
   const chatMessages = eventMessages.length ? eventMessages : fallbackMessages;
+  const activeTurnLastUpdatedAtMs = activeTurn
+    ? Math.max(activeTurn.startedAtMs || 0, lastEntryAtMs || 0, Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0)
+    : null;
+  const activeTurnStale = Boolean(activeTurn && nowMs - activeTurnLastUpdatedAtMs > ACTIVE_TURN_STALE_MS);
+  const visibleActiveTurn = activeTurnStale ? null : activeTurn;
   for (const message of interactionMessages) {
-    message.requiresDesktopAction = Boolean(activeTurn && (!message.turnId || message.turnId === activeTurn.turnId));
+    message.requiresDesktopAction = Boolean(visibleActiveTurn && (!message.turnId || message.turnId === visibleActiveTurn.turnId));
   }
   const pendingInteractions = interactionMessages.filter((message) => message.requiresDesktopAction);
-  const activeTurnWaitMs = activeTurn?.startedAtMs ? Date.now() - activeTurn.startedAtMs : 0;
+  const activeTurnWaitMs = visibleActiveTurn?.startedAtMs ? nowMs - visibleActiveTurn.startedAtMs : 0;
   const result = {
     meta,
     file: filePath,
     size: stat.size,
     mtimeMs: stat.mtimeMs,
     status: {
-      thinking: Boolean(activeTurn),
-      turnId: activeTurn?.turnId || null,
-      startedAtMs: activeTurn?.startedAtMs || null,
+      thinking: Boolean(visibleActiveTurn),
+      turnId: visibleActiveTurn?.turnId || null,
+      startedAtMs: visibleActiveTurn?.startedAtMs || null,
       interactionRequired: pendingInteractions.length > 0,
-      possibleDesktopAttention: Boolean(activeTurn && pendingInteractions.length === 0 && activeTurnWaitMs > 45_000)
+      possibleDesktopAttention: Boolean(visibleActiveTurn && pendingInteractions.length === 0 && activeTurnWaitMs > 45_000),
+      staleTurn: activeTurnStale,
+      staleTurnId: activeTurnStale ? activeTurn?.turnId || null : null,
+      staleTurnLastUpdatedAtMs: activeTurnStale ? activeTurnLastUpdatedAtMs : null
     },
     messages: [...chatMessages, ...pendingInteractions, ...noticeMessages, ...toolMessages].sort((a, b) => {
       if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
@@ -2062,7 +2077,7 @@ async function parseRollout(filePath) {
     })
   };
 
-  messageCache.set(filePath, { signature, result });
+  messageCache.set(filePath, { signature, result, cachedAtMs: nowMs });
   return result;
 }
 
@@ -2901,7 +2916,7 @@ server.listen(PORT, HOST, () => {
     }`
   );
   console.log(`Data:   ${codexHomeState.home}${codexHomeState.fixed ? " (fixed)" : " (dynamic)"}`);
-  if (process.stdin.isTTY) console.log("Type:   qr + Enter to print the sign-in QR code again");
+  if (process.stdin.isTTY) console.log("Type:   qr, no-auth, auth, or help + Enter for runtime commands");
   printQr();
 
   if (process.stdin.isTTY) {
@@ -2909,13 +2924,23 @@ server.listen(PORT, HOST, () => {
     terminal.on("line", (line) => {
       const command = line.trim().toLowerCase();
       if (command === "qr") printQr();
-      else if (command === "url") {
+      else if (command === "no-auth") {
+        AUTH_REQUIRED = false;
+        console.log("Access-code auth disabled. Existing and new browser sessions can access the LAN page without a code.");
+        console.log("Type auth + Enter to enable access-code auth again.");
+      } else if (command === "auth") {
+        AUTH_REQUIRED = true;
+        console.log("Access-code auth enabled.");
+        console.log(`Access code: ${ACCESS_TOKEN}`);
+        printQr();
+      } else if (command === "url") {
         console.log(`Local:  ${localUrl}`);
         for (const lanUrl of lanUrls) console.log(`LAN:    ${lanUrl}`);
-      } else if (command === "code" && AUTH_REQUIRED) {
+      } else if (command === "code") {
         console.log(`Access code: ${ACCESS_TOKEN}`);
+        if (!AUTH_REQUIRED) console.log("Access-code auth is currently disabled.");
       } else if (command === "help" || command === "?") {
-        console.log("Commands: qr, url, code, help");
+        console.log("Commands: qr, url, code, no-auth, auth, help");
       } else if (command) {
         console.log("Unknown command. Type help for available commands.");
       }

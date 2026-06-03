@@ -86,7 +86,7 @@ Local:  http://127.0.0.1:8787/
 LAN:    http://10.0.0.131:8787/
 Access code: 482913
 Mode:   write enabled · access-code protected
-Type:   qr + Enter to print the sign-in QR code again
+Type:   qr, no-auth, auth, or help + Enter for runtime commands
 
 QR:     opens the LAN page and signs in automatically
 ```
@@ -106,6 +106,19 @@ qr
 ```
 
 The QR code is equivalent to the current access code. Do not share terminal screenshots or QR codes with people you do not trust.
+
+## Runtime Terminal Commands
+
+While the service is running in an interactive terminal, you can type these commands and press Enter:
+
+```text
+qr       Print the sign-in QR code again
+url      Print local and LAN URLs again
+code     Print the current access code
+no-auth  Disable access-code auth without restarting
+auth     Enable access-code auth again and print the current sign-in QR code
+help     Show available commands
+```
 
 Use view-only mode:
 

@@ -86,7 +86,7 @@ Local:  http://127.0.0.1:8787/
 LAN:    http://10.0.0.131:8787/
 Access code: 482913
 Mode:   write enabled · access-code protected
-Type:   qr + Enter to print the sign-in QR code again
+Type:   qr, no-auth, auth, or help + Enter for runtime commands
 
 QR:     opens the LAN page and signs in automatically
 ```
@@ -106,6 +106,19 @@ qr
 ```
 
 二维码等价于当前访问码。不要把终端截图或二维码分享给不信任的人。
+
+## 运行时终端命令
+
+服务在交互式终端里运行时，可以输入这些命令并回车：
+
+```text
+qr       重新打印登录二维码
+url      重新打印本机和局域网 URL
+code     打印当前访问码
+no-auth  不重启服务，直接关闭访问码认证
+auth     重新开启访问码认证，并打印当前登录二维码
+help     显示可用命令
+```
 
 使用只读模式：
 
