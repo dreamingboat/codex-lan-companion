@@ -408,6 +408,7 @@ function clearHomeScopedCaches() {
   threadAccountCache = null;
   messageCache.clear();
   recentNotices.splice(0, recentNotices.length);
+  codexIpcClient?.clearHomeScopedState?.();
 }
 
 function normalizeCandidateHome(value) {
@@ -756,6 +757,11 @@ class DesktopCodexIpcClient {
     if (this.events.length > 120) this.events.splice(0, this.events.length - 120);
   }
 
+  clearHomeScopedState() {
+    this.events = [];
+    this.desktopConversationRows.clear();
+  }
+
   conversationIdFromMessage(message) {
     return (
       message?.conversationId ||
@@ -912,7 +918,7 @@ class DesktopCodexIpcClient {
           event.message?.params?.threadId ||
           event.message?.params?.thread_id ||
           "";
-        if (messageThreadId && String(messageThreadId) !== selectedThreadId) return [];
+        if (selectedThreadId && (!messageThreadId || String(messageThreadId) !== selectedThreadId)) return [];
         const meta = {
           source: "desktop-ipc",
           turnId: event.message?.turnId || event.message?.params?.turnId || null
@@ -948,7 +954,7 @@ class DesktopCodexIpcClient {
           event.message?.params?.threadId ||
           event.message?.params?.thread_id ||
           "";
-        if (messageThreadId && String(messageThreadId) !== selectedThreadId) return null;
+        if (selectedThreadId && (!messageThreadId || String(messageThreadId) !== selectedThreadId)) return null;
         const notice = messageFromNoticeEvent(event.timestamp, payload, {
           source: "desktop-ipc",
           turnId: event.message?.turnId || event.message?.params?.turnId || null
@@ -2743,7 +2749,7 @@ function findLiveApprovalRequest(threadId, fallbackRequestId) {
       event.message?.params?.threadId ||
       event.message?.params?.thread_id ||
       "";
-    if (messageThreadId && selectedThreadId && String(messageThreadId) !== selectedThreadId) continue;
+    if (selectedThreadId && (!messageThreadId || String(messageThreadId) !== selectedThreadId)) continue;
     const found = interactionPayloadsFromIpcMessage(event.message)
       .map((object) => {
         const methodText = String(object.method || object.type || object.name || "");

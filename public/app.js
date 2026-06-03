@@ -46,6 +46,7 @@ const els = {
   threadTitle: document.querySelector("#threadTitle"),
   threadMeta: document.querySelector("#threadMeta"),
   messageList: document.querySelector("#messageList"),
+  scrollToBottomButton: document.querySelector("#scrollToBottomButton"),
   refreshButton: document.querySelector("#refreshButton"),
   sidebarToggle: document.querySelector("#sidebarToggle"),
   drawerOverlay: document.querySelector("#drawerOverlay"),
@@ -876,6 +877,39 @@ function renderCurrentMessages(scrollToBottom = true) {
   if (scrollToBottom) {
     els.messageList.scrollTop = els.messageList.scrollHeight;
   }
+  updateScrollToBottomButton();
+}
+
+function isMessageListNearBottom() {
+  return els.messageList.scrollHeight - els.messageList.scrollTop - els.messageList.clientHeight < 120;
+}
+
+function updateScrollToBottomButton() {
+  const canScroll = els.messageList.scrollHeight > els.messageList.clientHeight + 8;
+  els.scrollToBottomButton.hidden = !canScroll || isMessageListNearBottom();
+}
+
+function updateComposerHeightVariable() {
+  els.composerForm.parentElement?.style.setProperty("--composer-height", `${els.composerForm.offsetHeight}px`);
+}
+
+function scrollMessagesToBottom({ smooth = true } = {}) {
+  els.messageList.scrollTo({
+    top: els.messageList.scrollHeight,
+    behavior: smooth ? "smooth" : "auto"
+  });
+  window.setTimeout(updateScrollToBottomButton, smooth ? 220 : 0);
+}
+
+function autoResizeComposerInput() {
+  const input = els.composerInput;
+  input.style.height = "auto";
+  const maxHeight = Number.parseFloat(getComputedStyle(input).maxHeight) || 170;
+  const nextHeight = Math.min(input.scrollHeight, maxHeight);
+  input.style.height = `${nextHeight}px`;
+  input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
+  updateComposerHeightVariable();
+  updateScrollToBottomButton();
 }
 
 function addPendingUserMessage(threadId, content, images = []) {
@@ -919,6 +953,7 @@ function renderMessages(data) {
 
   if (!displayMessages.length && !data.status?.thinking) {
     els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(state.selectedId === DRAFT_THREAD_ID ? t("newConversationReady") : t("emptyThread"))}</div>`;
+    updateScrollToBottomButton();
     return;
   }
 
@@ -969,6 +1004,7 @@ function renderMessages(data) {
     `
     : "";
   els.messageList.innerHTML = `${messageHtml}${thinkingHtml}`;
+  updateScrollToBottomButton();
 }
 
 function usageLine(label, window) {
@@ -1473,6 +1509,7 @@ function renderComposerMode() {
   els.composerInput.placeholder = allowWrite ? (state.selectedId === DRAFT_THREAD_ID ? t("newConversationReady") : t("sendToCodex")) : t("readonlyPlaceholder");
   if (!allowWrite) els.sendStatus.textContent = t("readonly");
   else if (els.sendStatus.textContent === t("readonly")) els.sendStatus.textContent = "";
+  autoResizeComposerInput();
   if (els.composerInput.disabled) {
     closePluginMentionMenu();
     closeSkillMentionMenu();
@@ -1558,13 +1595,13 @@ async function loadMessages(force = false) {
     renderComposerMode();
     const signature = `${data.thread?.updatedAtMs || ""}:${data.size || ""}:${data.mtimeMs || ""}:${state.showTools}:${data.status?.thinking ? "thinking" : "idle"}:${data.status?.interactionRequired ? "interaction" : "clear"}:${data.status?.turnId || ""}:${pendingSignature()}`;
     if (force || signature !== state.messagesSignature) {
-      const wasNearBottom =
-        els.messageList.scrollHeight - els.messageList.scrollTop - els.messageList.clientHeight < 120;
+      const wasNearBottom = isMessageListNearBottom();
       state.messagesSignature = signature;
       renderMessages(data);
       if (wasNearBottom || force) {
         els.messageList.scrollTop = els.messageList.scrollHeight;
       }
+      updateScrollToBottomButton();
     }
   } catch (error) {
     if (error.status === 401) throw error;
@@ -1668,6 +1705,14 @@ els.messageList.addEventListener("pointerdown", () => {
   closeSidebarOnCompact();
 });
 
+els.messageList.addEventListener("scroll", () => {
+  updateScrollToBottomButton();
+});
+
+els.scrollToBottomButton.addEventListener("click", () => {
+  scrollMessagesToBottom();
+});
+
 els.messageList.addEventListener("click", async (event) => {
   const noticeButton = event.target.closest(".notice-collapse-button");
   if (noticeButton) {
@@ -1727,6 +1772,8 @@ window.addEventListener("resize", () => {
     state.sidebarCollapsed = false;
     renderSidebarState();
   }
+  autoResizeComposerInput();
+  updateScrollToBottomButton();
 });
 
 els.searchInput.addEventListener("input", (event) => {
@@ -1881,6 +1928,7 @@ els.composerInput.addEventListener("keydown", (event) => {
 els.composerInput.addEventListener("input", () => {
   state.pluginActiveIndex = 0;
   state.skillActiveIndex = 0;
+  autoResizeComposerInput();
   updatePluginMentionMenu();
   updateSkillMentionMenu();
   renderComposerMode();
@@ -1997,6 +2045,7 @@ els.composerForm.addEventListener("submit", async (event) => {
         images: images.map(({ name, mimeType, data }) => ({ name, mimeType, data }))
       });
       els.composerInput.value = "";
+      autoResizeComposerInput();
       clearSelectedPlugins();
       clearSelectedSkills();
       state.imageAttachments = [];

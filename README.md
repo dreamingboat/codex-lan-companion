@@ -10,7 +10,7 @@ This is an unofficial tool. It reads local Codex Desktop state and, by default, 
 
 This repository is being prepared as the first public release of Codex LAN Companion.
 
-Important compatibility note: this first release was developed and verified only with the latest Codex Desktop available to the author at release time: Codex Desktop `26.527.60818` on macOS, tested on 2026-06-03. Codex Desktop local files and IPC are private implementation details, not public compatibility contracts. Newer Codex Desktop versions may change these interfaces and may partially or completely break this companion. If that happens, update this project against the new Codex Desktop behavior before relying on it.
+Important compatibility note: this first release was developed and verified only with the latest Codex Desktop available to the author at release time: Codex Desktop `26.601.21317` on macOS, tested on 2026-06-03. Codex Desktop local files and IPC are private implementation details, not public compatibility contracts. Newer Codex Desktop versions may change these interfaces and may partially or completely break this companion. If that happens, update this project against the new Codex Desktop behavior before relying on it.
 
 ## Features
 
@@ -175,7 +175,7 @@ Sending from the browser requires Codex Desktop to be running with the target co
 Validated environment for the first release:
 
 - macOS
-- Codex Desktop `26.527.60818`
+- Codex Desktop `26.601.21317`
 - Node.js 18+
 
 Other environments may work, but have not been verified for this first release.
@@ -214,7 +214,7 @@ Recommended defaults:
 
 This project depends on Codex Desktop local files and private IPC behavior. Those are not public compatibility contracts and may change in future Codex releases.
 
-For the first release, the author only verified against Codex Desktop `26.527.60818`, which was the latest available Codex Desktop build at the time of development and testing. There is no guarantee that this project will work with newer Codex Desktop builds without updates.
+For the first release, the author only verified against Codex Desktop `26.601.21317`, which was the latest available Codex Desktop build at the time of development and testing. There is no guarantee that this project will work with newer Codex Desktop builds without updates.
 
 ## Trademark Note
 

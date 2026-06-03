@@ -12,4 +12,4 @@ Initial public release.
 - Account and local plan-usage display when available from Codex local state.
 - Short 6-digit access code and terminal QR sign-in for local browser access.
 
-Compatibility note: this release was verified only with Codex Desktop `26.527.60818` on macOS. Codex Desktop local storage and IPC are private implementation details and may change in future builds.
+Compatibility note: this release was verified only with Codex Desktop `26.601.21317` on macOS. Codex Desktop local storage and IPC are private implementation details and may change in future builds.
