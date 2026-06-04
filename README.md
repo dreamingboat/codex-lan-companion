@@ -46,6 +46,22 @@ Important compatibility note: this first release was developed and verified only
 - Optional `--readonly` mode for view-only use
 - Terminal QR code sign-in for browser devices
 
+## Screenshots
+
+Desktop browser view:
+
+![Desktop browser view](docs/assets/desktop-wide.png)
+
+Mobile browser views:
+
+| Conversation list | Approval card |
+| --- | --- |
+| ![Mobile conversation list](docs/assets/mobile-thread-list.jpeg) | ![Mobile approval card](docs/assets/mobile-approval.jpeg) |
+
+| Plugin picker | Skill picker | Usage summary |
+| --- | --- | --- |
+| ![Mobile plugin picker](docs/assets/mobile-plugin-picker.jpeg) | ![Mobile skill picker](docs/assets/mobile-skill-picker.jpeg) | ![Mobile usage summary](docs/assets/mobile-usage.jpeg) |
+
 ## Install
 
 ### Quick Start For Users
