@@ -605,6 +605,20 @@ function renderMessageImages(message) {
   return `<div class="message-images">${inlineHtml}${localHtml}</div>`;
 }
 
+function renderPromotedToolImages(message) {
+  if (!messageImageCount(message) || state.showTools) return "";
+  const metaBottom = formatMessageDate(message.completedAtMs || message.timestamp);
+  return `
+    <article class="message assistant tool-image">
+      <div class="role">${roleBadge({ role: "assistant" })}</div>
+      <div class="bubble">
+        ${renderMessageImages(message)}
+        ${metaBottom ? `<div class="message-meta message-meta-bottom">${escapeHtml(metaBottom)}</div>` : ""}
+      </div>
+    </article>
+  `;
+}
+
 function mimeTypeForFile(file) {
   if (file.type) return file.type;
   const name = String(file.name || "").toLowerCase();
@@ -991,7 +1005,7 @@ function renderMessages(data) {
       const metaTop = messageMetaTop(message, previousUserMessage);
       const metaBottom = formatMessageDate(message.completedAtMs || message.timestamp);
       if (message.role === "user") previousUserMessage = message;
-      return `
+      const messageArticle = `
         <article class="message ${escapeHtml(message.role)}${message.kind === "pending" ? " pending" : ""}${hidden}">
           <div class="role">${roleBadge(message)}</div>
           <div class="bubble">
@@ -1004,6 +1018,7 @@ function renderMessages(data) {
           </div>
         </article>
       `;
+      return `${messageArticle}${isTool ? renderPromotedToolImages(message) : ""}`;
     })
     .join("");
   const thinkingHtml = data.status?.thinking

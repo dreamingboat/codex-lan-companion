@@ -1483,6 +1483,9 @@ function imagesFromContent(content) {
   return content
     .map((part) => {
       const source = part?.source || {};
+      if (part?.type === "input_image" && typeof part.image_url === "string" && part.image_url.startsWith("data:image/")) {
+        return part.image_url;
+      }
       if (part?.type !== "image" || source.type !== "base64" || !source.data || !source.media_type) return null;
       return `data:${source.media_type};base64,${source.data}`;
     })
@@ -1511,6 +1514,49 @@ function parseMaybeJsonObject(value) {
   } catch {
     return null;
   }
+}
+
+function parseMaybeJsonValue(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function imageUrlsFromValue(value, images = [], depth = 0, seen = new Set()) {
+  if (images.length >= 8 || value == null || depth > 8) return images;
+  if (typeof value === "string") {
+    if (value.startsWith("data:image/")) images.push(value);
+    return images;
+  }
+  if (typeof value !== "object" || seen.has(value)) return images;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) imageUrlsFromValue(item, images, depth + 1, seen);
+    return images;
+  }
+  const imageUrl = value.image_url || value.imageUrl;
+  if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) images.push(imageUrl);
+  const source = value.source || {};
+  if (source.type === "base64" && source.media_type && source.data) {
+    images.push(`data:${source.media_type};base64,${source.data}`);
+  }
+  for (const item of Object.values(value)) imageUrlsFromValue(item, images, depth + 1, seen);
+  return images;
+}
+
+function imagesFromToolOutput(output) {
+  const parsed = parseMaybeJsonValue(output);
+  return Array.from(new Set(imageUrlsFromValue(parsed ?? output)));
+}
+
+function compactToolOutput(output, images = []) {
+  if (images.length) return `[image output: ${images.length} image${images.length === 1 ? "" : "s"}]`;
+  const parsed = parseMaybeJsonValue(output);
+  if (parsed) return compact(redactLargePayloads(parsed), images.length ? 1800 : 6000);
+  return compact(output || "");
 }
 
 const INTERACTION_TYPE_PATTERNS = [
@@ -2013,12 +2059,14 @@ function messageFromResponseItem(timestamp, payload) {
     };
   }
   if (payload?.type === "function_call_output") {
+    const images = imagesFromToolOutput(payload.output);
     return {
       role: "tool",
       kind: "tool_output",
       timestamp,
       title: payload.call_id || "function_call_output",
-      content: compact(payload.output || "")
+      content: compactToolOutput(payload.output || "", images),
+      images
     };
   }
   if (payload?.type === "message") {
