@@ -176,6 +176,57 @@ Disable auth only on a trusted local network:
 codex-lan-companion --no-auth
 ```
 
+## Background Service on macOS
+
+For day-to-day use, install Codex LAN Companion as a macOS LaunchAgent instead of keeping a terminal session open. The service starts at login and restarts automatically if the process exits.
+
+Install and start the background service:
+
+```bash
+codex-lan-companion-install-service
+```
+
+Pass normal server options after the install command:
+
+```bash
+codex-lan-companion-install-service --no-auth
+codex-lan-companion-install-service --readonly --port 8790
+codex-lan-companion-install-service --password home-only
+```
+
+For source checkouts, the npm script is equivalent:
+
+```bash
+npm run service:install -- --no-auth
+```
+
+Check service status:
+
+```bash
+launchctl print gui/$(id -u)/com.openclaw.codex-lan-companion
+```
+
+View logs:
+
+```bash
+tail -f ~/Library/Logs/CodexLanCompanion/out.log
+tail -f ~/Library/Logs/CodexLanCompanion/error.log
+```
+
+Uninstall the background service:
+
+```bash
+codex-lan-companion-uninstall-service
+```
+
+Or from source:
+
+```bash
+npm run service:uninstall
+```
+
+If startup fails because port `8787` is already in use, stop the existing process or reinstall the service with another port.
+
 ## Options
 
 ```text

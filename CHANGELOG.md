@@ -11,5 +11,8 @@ Initial public release.
 - Plugin picker, skill picker, image attachments, interruption support, and approval display where detectable.
 - Account and local plan-usage display when available from Codex local state.
 - Short 6-digit access code and terminal QR sign-in for local browser access.
+- Documentation screenshots for desktop and mobile browser UI.
+- macOS LaunchAgent install/uninstall commands for running the companion as a background service.
+- Clear fatal startup logs for port conflicts, permission errors, uncaught exceptions, and unhandled promise rejections.
 
 Compatibility note: this release was verified only with Codex Desktop `26.601.21317` on macOS. Codex Desktop local storage and IPC are private implementation details and may change in future builds.

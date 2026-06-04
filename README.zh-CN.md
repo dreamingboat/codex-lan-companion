@@ -176,6 +176,57 @@ codex-lan-companion --port 8790 --password home-only
 codex-lan-companion --no-auth
 ```
 
+## macOS 后台服务
+
+日常使用时，建议把 Codex LAN Companion 安装成 macOS LaunchAgent，而不是长期放在一个终端窗口里运行。后台服务会在用户登录时启动，并在进程退出后自动重启。
+
+安装并启动后台服务：
+
+```bash
+codex-lan-companion-install-service
+```
+
+安装命令后可以继续传普通服务参数：
+
+```bash
+codex-lan-companion-install-service --no-auth
+codex-lan-companion-install-service --readonly --port 8790
+codex-lan-companion-install-service --password home-only
+```
+
+从源码运行时，也可以使用等价的 npm 脚本：
+
+```bash
+npm run service:install -- --no-auth
+```
+
+查看服务状态：
+
+```bash
+launchctl print gui/$(id -u)/com.openclaw.codex-lan-companion
+```
+
+查看日志：
+
+```bash
+tail -f ~/Library/Logs/CodexLanCompanion/out.log
+tail -f ~/Library/Logs/CodexLanCompanion/error.log
+```
+
+卸载后台服务：
+
+```bash
+codex-lan-companion-uninstall-service
+```
+
+或从源码卸载：
+
+```bash
+npm run service:uninstall
+```
+
+如果启动失败并提示端口 `8787` 已被占用，请先停止已有进程，或者用其他端口重新安装服务。
+
 ## 选项
 
 ```text

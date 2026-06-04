@@ -66,6 +66,22 @@ if (cli.help) {
   process.exit(cli.invalid ? 1 : 0);
 }
 
+function logFatalError(label, error) {
+  const message = error?.stack || error?.message || String(error);
+  console.error(`[fatal] ${label}`);
+  console.error(message);
+}
+
+process.on("uncaughtException", (error) => {
+  logFatalError("Uncaught exception", error);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (error) => {
+  logFatalError("Unhandled promise rejection", error);
+  process.exit(1);
+});
+
 const INITIAL_CODEX_HOME = cli.codexHome || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const CODEX_HOME_FIXED = Boolean(cli.codexHome || process.env.CODEX_LAN_FIXED_CODEX_HOME === "1");
 const HOST = cli.host || process.env.HOST || "0.0.0.0";
@@ -3010,6 +3026,21 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     sendJson(res, error.status || 500, { error: error.message || "Internal server error" });
   }
+});
+
+server.on("error", (error) => {
+  if (error?.code === "EADDRINUSE") {
+    console.error(`[fatal] Cannot start Codex LAN Companion: ${HOST}:${PORT} is already in use.`);
+    console.error("Stop the existing service first, choose another --port, or run:");
+    console.error("  lsof -nP -iTCP:%s -sTCP:LISTEN", PORT);
+    console.error("  codex-lan-companion-uninstall-service");
+  } else if (error?.code === "EACCES") {
+    console.error(`[fatal] Cannot start Codex LAN Companion: permission denied for ${HOST}:${PORT}.`);
+    console.error("Choose a different --host/--port or check local firewall and permission settings.");
+  } else {
+    logFatalError("HTTP server failed to start", error);
+  }
+  process.exit(1);
 });
 
 server.listen(PORT, HOST, () => {
