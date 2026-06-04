@@ -48,19 +48,15 @@ Important compatibility note: this first release was developed and verified only
 
 ## Screenshots
 
-Desktop browser view:
-
-![Desktop browser view](docs/assets/desktop-wide.png)
-
-Mobile browser views:
+Mobile browser mockups:
 
 | Conversation list | Approval card |
 | --- | --- |
-| ![Mobile conversation list](docs/assets/mobile-thread-list.jpeg) | ![Mobile approval card](docs/assets/mobile-approval.jpeg) |
+| ![Phone mockup showing the conversation list](docs/assets/phone-thread-list.png) | ![Phone mockup showing an approval card](docs/assets/phone-approval.png) |
 
 | Plugin picker | Skill picker | Usage summary |
 | --- | --- | --- |
-| ![Mobile plugin picker](docs/assets/mobile-plugin-picker.jpeg) | ![Mobile skill picker](docs/assets/mobile-skill-picker.jpeg) | ![Mobile usage summary](docs/assets/mobile-usage.jpeg) |
+| ![Phone mockup showing the plugin picker](docs/assets/phone-plugin-picker.png) | ![Phone mockup showing the skill picker](docs/assets/phone-skill-picker.png) | ![Phone mockup showing the usage summary](docs/assets/phone-usage.png) |
 
 ## Install
 
