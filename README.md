@@ -209,6 +209,8 @@ tail -f ~/Library/Logs/CodexLanCompanion/out.log
 tail -f ~/Library/Logs/CodexLanCompanion/error.log
 ```
 
+When the service is installed or reinstalled, oversized `out.log` and `error.log` files are rotated automatically under the same directory. Reinstalling also rewrites the LaunchAgent plist from the current command-line options, so removed legacy options are not kept in the background service.
+
 Uninstall the background service:
 
 ```bash

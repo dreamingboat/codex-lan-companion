@@ -209,6 +209,8 @@ tail -f ~/Library/Logs/CodexLanCompanion/out.log
 tail -f ~/Library/Logs/CodexLanCompanion/error.log
 ```
 
+安装或重新安装后台服务时，过大的 `out.log` 和 `error.log` 会在同一目录下自动轮转。重新安装也会用当前命令参数重写 LaunchAgent plist，避免已经移除的旧参数继续残留在后台服务里。
+
 卸载后台服务：
 
 ```bash

@@ -66,9 +66,23 @@ if (cli.help) {
   process.exit(cli.invalid ? 1 : 0);
 }
 
+function timestamp() {
+  return new Date().toISOString();
+}
+
+function logInfo(message = "") {
+  if (!message) console.log("");
+  else console.log(`[${timestamp()}] ${message}`);
+}
+
+function logError(message = "") {
+  if (!message) console.error("");
+  else console.error(`[${timestamp()}] ${message}`);
+}
+
 function logFatalError(label, error) {
   const message = error?.stack || error?.message || String(error);
-  console.error(`[fatal] ${label}`);
+  logError(`[fatal] ${label}`);
   console.error(message);
 }
 
@@ -462,7 +476,7 @@ function applyCodexHomeCandidate(candidate, source = "unknown") {
     changedAt: new Date().toISOString()
   };
   clearHomeScopedCaches();
-  console.log(`Codex home changed: ${home} (${source})`);
+  logInfo(`Codex home changed: ${home} (${source})`);
   return true;
 }
 
@@ -3078,13 +3092,13 @@ const server = http.createServer(async (req, res) => {
 
 server.on("error", (error) => {
   if (error?.code === "EADDRINUSE") {
-    console.error(`[fatal] Cannot start Codex LAN Companion: ${HOST}:${PORT} is already in use.`);
-    console.error("Stop the existing service first, choose another --port, or run:");
-    console.error("  lsof -nP -iTCP:%s -sTCP:LISTEN", PORT);
-    console.error("  codex-lan-companion-uninstall-service");
+    logError(`[fatal] Cannot start Codex LAN Companion: ${HOST}:${PORT} is already in use.`);
+    logError("Stop the existing service first, choose another --port, or run:");
+    logError(`  lsof -nP -iTCP:${PORT} -sTCP:LISTEN`);
+    logError("  codex-lan-companion-uninstall-service");
   } else if (error?.code === "EACCES") {
-    console.error(`[fatal] Cannot start Codex LAN Companion: permission denied for ${HOST}:${PORT}.`);
-    console.error("Choose a different --host/--port or check local firewall and permission settings.");
+    logError(`[fatal] Cannot start Codex LAN Companion: permission denied for ${HOST}:${PORT}.`);
+    logError("Choose a different --host/--port or check local firewall and permission settings.");
   } else {
     logFatalError("HTTP server failed to start", error);
   }
@@ -3105,17 +3119,17 @@ server.listen(PORT, HOST, () => {
     qrcode.generate(loginUrlFor(primaryUrl), { small: true });
   };
 
-  console.log("Codex LAN Companion is running");
-  console.log(`Local:  ${localUrl}`);
-  for (const lanUrl of lanUrls) console.log(`LAN:    ${lanUrl}`);
-  if (AUTH_REQUIRED) console.log(`Access code: ${ACCESS_TOKEN}`);
-  console.log(
+  logInfo("Codex LAN Companion is running");
+  logInfo(`Local:  ${localUrl}`);
+  for (const lanUrl of lanUrls) logInfo(`LAN:    ${lanUrl}`);
+  if (AUTH_REQUIRED) logInfo(`Access code: ${ACCESS_TOKEN}`);
+  logInfo(
     `Mode:   ${ALLOW_WRITE ? "write enabled" : "read-only"}${
       AUTH_REQUIRED ? " · access-code protected" : " · auth disabled"
     }`
   );
-  console.log(`Data:   ${codexHomeState.home}${codexHomeState.fixed ? " (fixed)" : " (dynamic)"}`);
-  if (process.stdin.isTTY) console.log("Type:   qr, no-auth, auth, or help + Enter for runtime commands");
+  logInfo(`Data:   ${codexHomeState.home}${codexHomeState.fixed ? " (fixed)" : " (dynamic)"}`);
+  if (process.stdin.isTTY) logInfo("Type:   qr, no-auth, auth, or help + Enter for runtime commands");
   printQr();
 
   if (process.stdin.isTTY) {
