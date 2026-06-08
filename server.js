@@ -1378,6 +1378,10 @@ function displayThreadTitle(row, sessionIndexTitles) {
   return indexedTitle || row.title || "Untitled";
 }
 
+function isArchivedThread(row) {
+  return row?.archived === true || Number(row?.archived) === 1;
+}
+
 async function getAccountInfo() {
   const now = Date.now();
   if (accountCache && now - accountCache.cachedAt < 15000) return accountCache.value;
@@ -1403,10 +1407,16 @@ async function getAccountInfo() {
 
 async function getThreads({ preserveIds = [] } = {}) {
   const { stateDb, sessionIndex } = codexPaths((await refreshCodexHomeContext()).home);
-  const appendRecentIpcRows = (rows) => {
+  const appendRecentIpcRows = (rows, excludedIds = new Set()) => {
     const seen = new Set(rows.map((row) => String(row.id || "")));
     const recentRows = codexIpcClient?.getDesktopConversationRows?.() || codexIpcClient?.getRecentConversationRows?.() || [];
-    return [...rows, ...recentRows.filter((row) => !seen.has(String(row.id || "")))].sort((a, b) => {
+    return [
+      ...rows,
+      ...recentRows.filter((row) => {
+        const id = String(row.id || "");
+        return !isArchivedThread(row) && !excludedIds.has(id) && !seen.has(id);
+      })
+    ].sort((a, b) => {
       const updatedA = Number(a.updatedAtMs) || 0;
       const updatedB = Number(b.updatedAtMs) || 0;
       return updatedB - updatedA;
@@ -1422,17 +1432,21 @@ async function getThreads({ preserveIds = [] } = {}) {
       LIMIT 500;
     `);
     const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
-    return appendRecentIpcRows(filtered.rows.map((row) => ({
-      id: row.id,
-      title: displayThreadTitle(row, sessionIndexTitles),
-      rolloutPath: row.rolloutPath,
-      createdAtMs: row.createdAtMs,
-      updatedAtMs: row.updatedAtMs,
-      archived: Boolean(row.archived),
-      preview: row.preview || "",
-      cwd: row.cwd || "",
-      model: row.model || ""
-    })));
+    const archivedIds = new Set(rows.filter(isArchivedThread).map((row) => String(row.id || "")));
+    return appendRecentIpcRows(
+      filtered.rows.filter((row) => !isArchivedThread(row)).map((row) => ({
+        id: row.id,
+        title: displayThreadTitle(row, sessionIndexTitles),
+        rolloutPath: row.rolloutPath,
+        createdAtMs: row.createdAtMs,
+        updatedAtMs: row.updatedAtMs,
+        archived: Boolean(row.archived),
+        preview: row.preview || "",
+        cwd: row.cwd || "",
+        model: row.model || ""
+      })),
+      archivedIds
+    );
   }
 
   const content = await fs.readFile(sessionIndex, "utf8");
