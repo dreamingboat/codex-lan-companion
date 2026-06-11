@@ -86,6 +86,48 @@ function logFatalError(label, error) {
   console.error(message);
 }
 
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours || parts.length) parts.push(`${hours}h`);
+  if (minutes || parts.length) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
+const PROCESS_STARTED_AT_MS = Date.now();
+const PROCESS_STARTED_AT_ISO = new Date(PROCESS_STARTED_AT_MS).toISOString();
+const SYSTEM_BOOT_AT_MS = PROCESS_STARTED_AT_MS - Math.round(os.uptime() * 1000);
+const SYSTEM_BOOT_AT_ISO = new Date(SYSTEM_BOOT_AT_MS).toISOString();
+const START_SOURCE = process.env.XPC_SERVICE_NAME ? `launchd:${process.env.XPC_SERVICE_NAME}` : "terminal";
+const IS_INTERACTIVE_TTY = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+const SLOW_REQUEST_MS = 1000;
+const AUTH_WARN_LOG_INTERVAL_MS = 5 * 60 * 1000;
+const authWarnLogState = new Map();
+
+function normalizeLogPath(pathname) {
+  return String(pathname || "/").replace(/\/api\/threads\/[0-9a-fA-F-]{20,}\/messages$/, "/api/threads/:id/messages");
+}
+
+function shouldLogHttpEvent({ method, pathname, statusCode, level }) {
+  if (level !== "warn" || statusCode !== 401) return true;
+  const key = `${method} ${normalizeLogPath(pathname)} ${statusCode}`;
+  const now = Date.now();
+  const state = authWarnLogState.get(key);
+  if (!state || now - state.lastLoggedAt >= AUTH_WARN_LOG_INTERVAL_MS) {
+    const suppressed = state?.suppressed || 0;
+    authWarnLogState.set(key, { lastLoggedAt: now, suppressed: 0 });
+    return { suppressed };
+  }
+  state.suppressed += 1;
+  return false;
+}
+
 process.on("uncaughtException", (error) => {
   logFatalError("Uncaught exception", error);
   process.exit(1);
@@ -718,13 +760,31 @@ class DesktopCodexIpcClient {
   reset(error) {
     for (const { reject, timer } of this.pending.values()) {
       clearTimeout(timer);
-      reject(error);
+      if (error) reject(error);
     }
     this.pending.clear();
     this.ready = null;
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.clientId = null;
+  }
+
+  close() {
+    const socket = this.socket;
+    if (socket) {
+      socket.removeAllListeners();
+      try {
+        socket.end();
+      } catch {
+        // Ignore shutdown errors.
+      }
+      try {
+        socket.destroy();
+      } catch {
+        // Ignore shutdown errors.
+      }
+    }
+    this.reset();
   }
 
   encode(message) {
@@ -2994,6 +3054,20 @@ async function serveLocalImage(res, filePath) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const requestStartedAt = performance.now();
+  const requestMethod = req.method || "UNKNOWN";
+  res.once("finish", () => {
+    const durationMs = Math.round(performance.now() - requestStartedAt);
+    if (res.statusCode >= 400 || durationMs >= SLOW_REQUEST_MS) {
+      const level = res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "slow";
+      const message = `[http:${level}] ${requestMethod} ${url.pathname} ${res.statusCode} ${durationMs}ms`;
+      const logDecision = shouldLogHttpEvent({ method: requestMethod, pathname: url.pathname, statusCode: res.statusCode, level });
+      if (!logDecision) return;
+      const suppressed = typeof logDecision === "object" && logDecision.suppressed ? ` (suppressed ${logDecision.suppressed} similar)` : "";
+      if (res.statusCode >= 500) logError(`${message}${suppressed}`);
+      else logInfo(`${message}${suppressed}`);
+    }
+  });
   try {
     if (req.method === "GET" && url.pathname === "/api/local-image") {
       if (!requireAuthorized(req, res, url)) return;
@@ -3100,9 +3174,41 @@ const server = http.createServer(async (req, res) => {
     }
     await serveStatic(res, decodeURIComponent(url.pathname));
   } catch (error) {
+    logError(`[http:error] ${requestMethod} ${url.pathname}: ${error?.stack || error?.message || String(error)}`);
     sendJson(res, error.status || 500, { error: error.message || "Internal server error" });
   }
 });
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logInfo(`[shutdown] Received ${signal}; closing HTTP server and IPC client.`);
+  const closeServer = new Promise((resolve) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close((error) => {
+      if (error) logFatalError("HTTP server close failed", error);
+      resolve();
+    });
+  });
+  const timeout = setTimeout(() => {
+    logError("[shutdown] Close timeout reached; forcing exit.");
+    process.exit(1);
+  }, 5000);
+  timeout.unref?.();
+  try {
+    codexIpcClient?.close?.();
+  } catch (error) {
+    logFatalError("IPC client close failed", error);
+  }
+  await closeServer;
+  clearTimeout(timeout);
+  logInfo("[shutdown] Complete.");
+  process.exit(0);
+}
 
 server.on("error", (error) => {
   if (error?.code === "EADDRINUSE") {
@@ -3119,6 +3225,14 @@ server.on("error", (error) => {
   process.exit(1);
 });
 
+process.once("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+
+process.once("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
+
 server.listen(PORT, HOST, () => {
   const localUrl = `http://127.0.0.1:${PORT}/`;
   const lanUrls = Object.values(os.networkInterfaces())
@@ -3126,7 +3240,12 @@ server.listen(PORT, HOST, () => {
     .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
     .map((entry) => `http://${entry.address}:${PORT}/`);
   const primaryUrl = lanUrls[0] || localUrl;
+  const printRuntimeUrls = () => {
+    logInfo(`Local:  ${localUrl}`);
+    for (const lanUrl of lanUrls) logInfo(`LAN:    ${lanUrl}`);
+  };
   const printQr = () => {
+    if (!IS_INTERACTIVE_TTY) return;
     console.log("");
     if (AUTH_REQUIRED) console.log("QR:     opens the LAN page and signs in automatically");
     else console.log("QR:     opens the LAN page");
@@ -3134,8 +3253,10 @@ server.listen(PORT, HOST, () => {
   };
 
   logInfo("Codex LAN Companion is running");
-  logInfo(`Local:  ${localUrl}`);
-  for (const lanUrl of lanUrls) logInfo(`LAN:    ${lanUrl}`);
+  logInfo(`Boot:   ${SYSTEM_BOOT_AT_ISO} (${formatDuration(PROCESS_STARTED_AT_MS - SYSTEM_BOOT_AT_MS)} ago)`);
+  logInfo(`Start:  ${PROCESS_STARTED_AT_ISO}`);
+  logInfo(`Origin: ${START_SOURCE}${IS_INTERACTIVE_TTY ? " · interactive terminal" : " · background service"}`);
+  printRuntimeUrls();
   if (AUTH_REQUIRED) logInfo(`Access code: ${ACCESS_TOKEN}`);
   logInfo(
     `Mode:   ${ALLOW_WRITE ? "write enabled" : "read-only"}${
@@ -3143,10 +3264,12 @@ server.listen(PORT, HOST, () => {
     }`
   );
   logInfo(`Data:   ${codexHomeState.home}${codexHomeState.fixed ? " (fixed)" : " (dynamic)"}`);
-  if (process.stdin.isTTY) logInfo("Type:   qr, no-auth, auth, or help + Enter for runtime commands");
-  printQr();
+  if (IS_INTERACTIVE_TTY) {
+    logInfo("Type:   qr, url, code, no-auth, auth, or help + Enter for runtime commands");
+    printQr();
+  }
 
-  if (process.stdin.isTTY) {
+  if (IS_INTERACTIVE_TTY) {
     const terminal = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "" });
     terminal.on("line", (line) => {
       const command = line.trim().toLowerCase();

@@ -15,6 +15,7 @@ const state = {
   codexHomeVersion: null,
   draftStartedAt: 0,
   authToken: "",
+  authLocked: false,
   threadStatus: null,
   composerBusy: false,
   imageAttachments: [],
@@ -389,12 +390,18 @@ function showAuthGate(message = "") {
 function hideAuthGate() {
   els.authGate.hidden = true;
   els.authError.textContent = "";
+  state.authLocked = false;
 }
 
 function lockApp(message = "") {
+  if (state.authLocked && els.authGate.hidden === false) {
+    if (message) els.authError.textContent = message;
+    return;
+  }
   safeStorageRemove(sessionStorage, "codexLanToken");
   safeStorageRemove(localStorage, "codexLanToken");
   state.authToken = "";
+  state.authLocked = true;
   state.config = null;
   state.messagesSignature = "";
   state.pendingMessages = [];
@@ -404,6 +411,16 @@ function lockApp(message = "") {
   els.threadCount.textContent = t("needAccessCode");
   els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(t("enterAccessCode"))}</div>`;
   showAuthGate(message);
+}
+
+function handleUnauthorized(error) {
+  if (error?.status !== 401) return false;
+  lockApp(state.authToken ? t("accessCodeWrong") : t("enterAccessCode"));
+  return true;
+}
+
+function shouldSync() {
+  return Boolean(state.config && !state.authLocked);
 }
 
 function formatDate(ms) {
@@ -1107,6 +1124,7 @@ async function fetchJson(url) {
   if (!response.ok) {
     const error = new Error(data.error || response.statusText);
     error.status = response.status;
+    handleUnauthorized(error);
     throw error;
   }
   return data;
@@ -1164,6 +1182,7 @@ async function postJson(url, body) {
   if (!response.ok) {
     const error = new Error(data.error || response.statusText);
     error.status = response.status;
+    handleUnauthorized(error);
     throw error;
   }
   return data;
@@ -1664,7 +1683,9 @@ async function refresh(forceMessages = false) {
 }
 
 function refreshSoon(delayMs = 700) {
-  setTimeout(() => refresh(true), delayMs);
+  setTimeout(() => {
+    if (shouldSync()) refresh(true);
+  }, delayMs);
 }
 
 function shouldRefocusComposer() {
@@ -2110,11 +2131,11 @@ initResponsiveSidebar();
 refresh(true);
 loadAccount();
 setInterval(() => {
-  if (state.config) loadThreads().catch(() => {});
+  if (shouldSync()) loadThreads().catch(handleUnauthorized);
 }, 3000);
 setInterval(() => {
-  if (state.config) loadMessages(false).catch(() => {});
+  if (shouldSync()) loadMessages(false).catch(handleUnauthorized);
 }, 1000);
 setInterval(() => {
-  if (state.config) loadAccount().catch(() => {});
+  if (shouldSync()) loadAccount().catch(handleUnauthorized);
 }, 30000);

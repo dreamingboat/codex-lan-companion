@@ -116,7 +116,7 @@ Local:  http://127.0.0.1:8787/
 LAN:    http://10.0.0.131:8787/
 Access code: 482913
 Mode:   write enabled · access-code protected
-Type:   qr, no-auth, auth, or help + Enter for runtime commands
+Type:   qr, url, code, no-auth, auth, or help + Enter for runtime commands
 
 QR:     opens the LAN page and signs in automatically
 ```
@@ -209,7 +209,9 @@ tail -f ~/Library/Logs/CodexLanCompanion/out.log
 tail -f ~/Library/Logs/CodexLanCompanion/error.log
 ```
 
-安装或重新安装后台服务时，过大的 `out.log` 和 `error.log` 会在同一目录下自动轮转。重新安装也会用当前命令参数重写 LaunchAgent plist，避免已经移除的旧参数继续残留在后台服务里。
+当服务作为 LaunchAgent 运行时，它会记录 URL、模式和启动上下文，但会跳过二维码输出，避免后台日志被无关内容淹没。
+
+慢请求（至少一秒）和失败的 HTTP 请求会记录方法、路径、状态码和耗时。安装或重新安装后台服务时，安装程序会等待旧实例完全停止后再启动新实例，并自动轮转同一目录下过大的 `out.log` 和 `error.log`。重新安装也会用当前命令参数重写 LaunchAgent plist，避免已经移除的旧参数继续残留在后台服务里。
 
 卸载后台服务：
 

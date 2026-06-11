@@ -59,6 +59,19 @@ function runQuiet(command, args) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForServiceStop(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!runQuiet("launchctl", ["print", `${userDomain}/${label}`]).trim()) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
 function normalizeServiceArgs(args) {
   const flagsWithValues = new Set(["--host", "--port", "--password", "--token", "--codex-home", "--ipc-socket"]);
   const booleanFlags = new Set(["--readonly", "--no-auth"]);
@@ -165,6 +178,10 @@ ${programArgs}
 `;
 
 runQuiet("launchctl", ["bootout", userDomain, plistPath]);
+if (!(await waitForServiceStop())) {
+  console.error(`Timed out waiting for ${label} to stop before reinstalling.`);
+  process.exit(1);
+}
 runQuiet("launchctl", ["enable", `${userDomain}/${label}`]);
 rotateLogFile(path.join(logDir, "out.log"));
 rotateLogFile(path.join(logDir, "error.log"));

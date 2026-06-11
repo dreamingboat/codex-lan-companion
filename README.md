@@ -116,7 +116,7 @@ Local:  http://127.0.0.1:8787/
 LAN:    http://10.0.0.131:8787/
 Access code: 482913
 Mode:   write enabled · access-code protected
-Type:   qr, no-auth, auth, or help + Enter for runtime commands
+Type:   qr, url, code, no-auth, auth, or help + Enter for runtime commands
 
 QR:     opens the LAN page and signs in automatically
 ```
@@ -209,7 +209,9 @@ tail -f ~/Library/Logs/CodexLanCompanion/out.log
 tail -f ~/Library/Logs/CodexLanCompanion/error.log
 ```
 
-When the service is installed or reinstalled, oversized `out.log` and `error.log` files are rotated automatically under the same directory. Reinstalling also rewrites the LaunchAgent plist from the current command-line options, so removed legacy options are not kept in the background service.
+When the service runs as a LaunchAgent, it logs URLs, mode, and startup context but skips QR output so the background logs stay clean.
+
+Slow requests (at least one second) and failed HTTP requests are logged with their method, path, status, and duration. When the service is installed or reinstalled, the installer waits for the old instance to stop before starting the replacement, and oversized `out.log` and `error.log` files are rotated automatically under the same directory. Reinstalling also rewrites the LaunchAgent plist from the current command-line options, so removed legacy options are not kept in the background service.
 
 Uninstall the background service:
 
