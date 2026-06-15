@@ -34,6 +34,7 @@ Important compatibility note: this first release was developed and verified only
 - Browser-device access across the LAN: macOS, Windows, Linux, phones, tablets, Kindle/e-readers, smart displays, and more
 - Mobile-friendly conversation list and message view
 - Live-ish sync, including an active "thinking" indicator
+- Performance-oriented recent-message sync for long conversations
 - Account and local plan-usage summary when available from Codex local state
 - Plugin picker in the composer, including friendly plugin chips
 - Skill picker in the composer, including `/` trigger and friendly skill chips
@@ -279,6 +280,7 @@ The server never returns Codex auth tokens to the browser.
 
 - Compatibility is tied to Codex Desktop local storage and private IPC behavior. Future Codex Desktop updates may break conversation sync, account display, approvals, plugin mentions, sending, or interruption support.
 - Sync is near-real-time rather than push-perfect. Conversation data is refreshed frequently, but some Codex Desktop UI-only states may appear with delay or may not be detectable.
+- For performance, the web UI syncs a recent message window by default instead of the full conversation history. Older tool messages and ordinary folded notices outside the most recent message range may be omitted from the browser view. Important notices, approval cards, and recent visible user/assistant messages are prioritized.
 - Some Codex Desktop prompts, warnings, or approval states may not be fully actionable from the web UI. Keep Codex Desktop accessible for fallback.
 - New conversations created by the web UI may not appear immediately in Codex Desktop's own sidebar; Codex Desktop appears to refresh its list on its own schedule.
 - This is intended for trusted LAN use. It is not hardened for public internet exposure.

@@ -7,7 +7,8 @@ const state = {
   showTools: false,
   expandedNotices: {},
   sidebarCollapsed: false,
-  loadingMessages: false,
+  messageRequestSeq: 0,
+  activeMessageRequest: null,
   account: null,
   accountExpanded: false,
   config: null,
@@ -39,6 +40,12 @@ const state = {
   skillActiveIndex: 0,
   selectedSkills: []
 };
+
+const MESSAGE_SYNC_LIMIT = 80;
+const THREAD_SYNC_INTERVAL_MS = 12000;
+const MESSAGE_SYNC_THINKING_MS = 2000;
+const MESSAGE_SYNC_IDLE_MS = 6000;
+const ACCOUNT_SYNC_INTERVAL_MS = 30000;
 
 const els = {
   shell: document.querySelector("#shell"),
@@ -989,11 +996,11 @@ function renderMessages(data) {
   const displayMessages = mergePendingMessages(data);
   const statusText = data.status?.interactionRequired
     ? `${t("separator")}${t("interactionRequired")}`
-    : data.status?.possibleDesktopAttention
-      ? `${t("separator")}${t("desktopMayNeedAttention")}`
-      : data.status?.thinking
+    : data.status?.thinking
         ? `${t("separator")}${t("thinking")}`
-        : "";
+        : data.status?.possibleDesktopAttention
+          ? `${t("separator")}${t("desktopMayNeedAttention")}`
+          : "";
   els.threadMeta.textContent = `${t("contents", { count: displayMessages.length })}${statusText}`;
 
   if (!displayMessages.length && !data.status?.thinking) {
@@ -1044,7 +1051,7 @@ function renderMessages(data) {
         <div class="role">${roleBadge({ role: "assistant" })}</div>
         <div class="bubble thinking-bubble">
           <div class="message-meta message-meta-top">${escapeHtml(t("processing"))}</div>
-          <p>${escapeHtml((data.status?.possibleDesktopAttention ? t("desktopMayNeedAttention") : t("thinking").replace("...", "")))}<span class="thinking-dots" aria-hidden="true"></span></p>
+          <p>${escapeHtml(t("thinking").replace("...", ""))}<span class="thinking-dots" aria-hidden="true"></span></p>
         </div>
       </article>
     `
@@ -1545,7 +1552,7 @@ function renderComposerMode() {
   const allowWrite = Boolean(state.config?.allowWrite);
   const thinking = Boolean(state.threadStatus?.thinking);
   const hasTarget = Boolean(state.selectedId);
-  const canSend = allowWrite && hasTarget && !state.composerBusy && (thinking || hasComposerPayload());
+  const canSend = allowWrite && hasTarget && (thinking || (!state.composerBusy && hasComposerPayload()));
   els.composerInput.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.attachButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.pluginPickerButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
@@ -1622,9 +1629,12 @@ function renderTransientSyncError(error) {
   els.threadMeta.textContent = `${t("syncTemporaryFailed")}${t("separator")}${error.message}`;
 }
 
-async function loadMessages(force = false) {
-  if (!state.selectedId || state.loadingMessages) return;
-  if (state.selectedId === DRAFT_THREAD_ID) {
+async function loadMessages(force = false, threadId = state.selectedId) {
+  if (!threadId) return;
+  const request = { id: ++state.messageRequestSeq, threadId };
+  state.activeMessageRequest = request;
+  if (threadId === DRAFT_THREAD_ID) {
+    if (state.selectedId !== threadId || state.activeMessageRequest !== request) return;
     state.lastMessagesData = {
       thread: state.draftThread,
       messages: [],
@@ -1633,11 +1643,12 @@ async function loadMessages(force = false) {
     state.threadStatus = state.lastMessagesData.status;
     renderComposerMode();
     renderMessages(state.lastMessagesData);
+    state.activeMessageRequest = null;
     return;
   }
-  state.loadingMessages = true;
   try {
-    const data = await fetchJson(`/api/threads/${state.selectedId}/messages`);
+    const data = await fetchJson(`/api/threads/${threadId}/messages?limit=${MESSAGE_SYNC_LIMIT}`);
+    if (state.selectedId !== threadId || state.activeMessageRequest !== request) return;
     state.lastMessagesData = data;
     state.threadStatus = data.status || null;
     renderComposerMode();
@@ -1652,6 +1663,7 @@ async function loadMessages(force = false) {
       updateScrollToBottomButton();
     }
   } catch (error) {
+    if (state.selectedId !== threadId || state.activeMessageRequest !== request) return;
     if (error.status === 401) throw error;
     if (state.messagesSignature) {
       renderTransientSyncError(error);
@@ -1659,7 +1671,7 @@ async function loadMessages(force = false) {
       els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
     }
   } finally {
-    state.loadingMessages = false;
+    if (state.activeMessageRequest === request) state.activeMessageRequest = null;
   }
 }
 
@@ -1704,7 +1716,7 @@ els.threadList.addEventListener("click", (event) => {
   els.sendStatus.textContent = "";
   renderComposerMode();
   renderThreads();
-  loadMessages(true);
+  loadMessages(true, state.selectedId);
   closeSidebarOnCompact();
 });
 
@@ -2065,8 +2077,8 @@ els.composerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   closePluginMentionMenu();
   if (!state.config?.allowWrite) return;
-  if (state.composerBusy) return;
   const thinking = Boolean(state.threadStatus?.thinking);
+  if (state.composerBusy && !thinking) return;
   const isDraftThread = state.selectedId === DRAFT_THREAD_ID;
   const message = els.composerInput.value.trim();
   const sendMessage = composerSendMessage(message);
@@ -2076,8 +2088,14 @@ els.composerForm.addEventListener("submit", async (event) => {
     els.sendStatus.textContent = t("busyCannotSend");
     return;
   }
+  const previousThreadStatus = state.threadStatus;
   const pendingMessageId = thinking || isDraftThread ? null : addPendingUserMessage(state.selectedId, sendMessage, images);
   state.composerBusy = true;
+  if (!thinking && !isDraftThread) {
+    state.threadStatus = { ...(state.threadStatus || {}), thinking: true, possibleDesktopAttention: false };
+    state.messagesSignature = "";
+    renderCurrentMessages(true);
+  }
   renderComposerMode();
   els.sendStatus.textContent = "";
   try {
@@ -2112,6 +2130,11 @@ els.composerForm.addEventListener("submit", async (event) => {
     }
   } catch (error) {
     if (pendingMessageId) removePendingMessage(pendingMessageId);
+    if (!thinking) {
+      state.threadStatus = previousThreadStatus;
+      state.messagesSignature = "";
+      renderCurrentMessages(true);
+    }
     if (!thinking && /image/i.test(error.message || "")) {
       state.imageAttachments = [];
       els.imageInput.value = "";
@@ -2132,10 +2155,15 @@ refresh(true);
 loadAccount();
 setInterval(() => {
   if (shouldSync()) loadThreads().catch(handleUnauthorized);
-}, 3000);
-setInterval(() => {
-  if (shouldSync()) loadMessages(false).catch(handleUnauthorized);
-}, 1000);
+}, THREAD_SYNC_INTERVAL_MS);
+function scheduleMessageSync() {
+  const delay = state.threadStatus?.thinking ? MESSAGE_SYNC_THINKING_MS : MESSAGE_SYNC_IDLE_MS;
+  setTimeout(async () => {
+    if (shouldSync()) await loadMessages(false).catch(handleUnauthorized);
+    scheduleMessageSync();
+  }, delay);
+}
+scheduleMessageSync();
 setInterval(() => {
   if (shouldSync()) loadAccount().catch(handleUnauthorized);
-}, 30000);
+}, ACCOUNT_SYNC_INTERVAL_MS);

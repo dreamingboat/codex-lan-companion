@@ -18,6 +18,16 @@ function parseCliArgs(argv) {
     const arg = argv[index];
     const [flag, inlineValue] = arg.split("=", 2);
     const nextValue = () => inlineValue ?? argv[++index];
+    if (flag === "--write") {
+      console.error("Ignoring deprecated --write; write mode is enabled by default. Use --readonly to disable writes.");
+      continue;
+    }
+    if (flag === "--dev-any-code") {
+      console.error("Unsupported option: --dev-any-code. This internal test flag is not valid for Codex LAN Companion.");
+      options.help = true;
+      options.invalid = true;
+      continue;
+    }
     if (flag === "--help" || flag === "-h") options.help = true;
     else if (flag === "--host") options.host = nextValue();
     else if (flag === "--port") options.port = nextValue();
@@ -107,8 +117,11 @@ const SYSTEM_BOOT_AT_ISO = new Date(SYSTEM_BOOT_AT_MS).toISOString();
 const START_SOURCE = process.env.XPC_SERVICE_NAME ? `launchd:${process.env.XPC_SERVICE_NAME}` : "terminal";
 const IS_INTERACTIVE_TTY = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const SLOW_REQUEST_MS = 1000;
+const SLOW_SQL_MS = 750;
+const THREADS_CACHE_MS = 1500;
 const AUTH_WARN_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const authWarnLogState = new Map();
+let threadsCache = null;
 
 function normalizeLogPath(pathname) {
   return String(pathname || "/").replace(/\/api\/threads\/[0-9a-fA-F-]{20,}\/messages$/, "/api/threads/:id/messages");
@@ -126,6 +139,14 @@ function shouldLogHttpEvent({ method, pathname, statusCode, level }) {
   }
   state.suppressed += 1;
   return false;
+}
+
+function summarizeSql(sql) {
+  return String(sql || "").replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+function clearThreadsCache() {
+  threadsCache = null;
 }
 
 process.on("uncaughtException", (error) => {
@@ -158,6 +179,10 @@ const MAX_SEND_IMAGES = 4;
 const MAX_SEND_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_SEND_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_LOCAL_IMAGE_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MESSAGE_LIMIT = 80;
+const MAX_MESSAGE_LIMIT = 1000;
+const TAIL_ROLLOUT_MIN_BYTES = 512 * 1024;
+const TAIL_ROLLOUT_MAX_BYTES = 4 * 1024 * 1024;
 const MIN_SEND_IMAGE_BYTES = 512;
 const MIN_SEND_IMAGE_EDGE = 16;
 const MAX_SEND_IMAGE_EDGE = 4096;
@@ -1973,6 +1998,79 @@ function dedupeInteractionMessages(messages) {
   return result;
 }
 
+function messageSortCompare(a, b) {
+  if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
+  return (a.lineNumber || 0) - (b.lineNumber || 0);
+}
+
+function normalizeMessageLimit(value) {
+  const limit = Number(value);
+  if (!Number.isFinite(limit) || limit <= 0) return DEFAULT_MESSAGE_LIMIT;
+  return Math.min(MAX_MESSAGE_LIMIT, Math.max(20, Math.floor(limit)));
+}
+
+function isImportantNoticeMessage(message) {
+  if (message?.kind === "error") return true;
+  const text = [message?.kind, message?.title, message?.content].filter(Boolean).join(" ").toLowerCase();
+  return /\b(error|failed?|limit|quota|rate_limit|usage_limit|plan_limit)\b/.test(text);
+}
+
+function shouldAlwaysReturnMessage(message, status = {}) {
+  if (!message) return false;
+  if (message.requiresDesktopAction) return true;
+  if (message.role === "interaction") return Boolean(status.interactionRequired && message.source === "desktop-ipc" && message.canApprove);
+  if (message.role === "notice") return isImportantNoticeMessage(message);
+  return false;
+}
+
+function isLowPriorityHiddenByDefaultMessage(message) {
+  if (!message) return false;
+  if (message.role === "tool") return true;
+  if (message.role === "notice" && !isImportantNoticeMessage(message)) return true;
+  return false;
+}
+
+function clientMessageKey(message) {
+  return [
+    message?.id,
+    message?.requestId,
+    message?.turnId,
+    message?.lineNumber,
+    message?.role,
+    message?.timestamp,
+    String(message?.content || "").slice(0, 120)
+  ]
+    .filter((value) => value !== undefined && value !== null && value !== "")
+    .join(":");
+}
+
+function limitMessagesForClient(messages, status = {}, limit = DEFAULT_MESSAGE_LIMIT) {
+  const normalizedLimit = normalizeMessageLimit(limit);
+  const sorted = Array.isArray(messages) ? messages.slice().sort(messageSortCompare) : [];
+  const recentLowPriorityKeys = new Set(sorted.slice(-10).filter(isLowPriorityHiddenByDefaultMessage).map(clientMessageKey));
+  const visiblePriorityMessages = sorted.filter((message) => !isLowPriorityHiddenByDefaultMessage(message) || recentLowPriorityKeys.has(clientMessageKey(message)));
+  if (visiblePriorityMessages.length <= normalizedLimit) {
+    return {
+      messages: visiblePriorityMessages,
+      totalMessages: sorted.length,
+      truncated: visiblePriorityMessages.length !== sorted.length,
+      limit: normalizedLimit,
+      omittedMessages: Math.max(0, sorted.length - visiblePriorityMessages.length)
+    };
+  }
+  const tail = visiblePriorityMessages.slice(-normalizedLimit);
+  const includedKeys = new Set(tail.map(clientMessageKey));
+  const pinned = visiblePriorityMessages.filter((message) => shouldAlwaysReturnMessage(message, status) && !includedKeys.has(clientMessageKey(message)));
+  const limited = [...pinned, ...tail].sort(messageSortCompare);
+  return {
+    messages: limited,
+    totalMessages: sorted.length,
+    truncated: true,
+    limit: normalizedLimit,
+    omittedMessages: Math.max(0, sorted.length - limited.length)
+  };
+}
+
 const NOTICE_TYPE_PATTERNS = [
   "notice",
   "notification",
@@ -2177,128 +2275,132 @@ function isTurnEndEvent(payload) {
   return payload?.type === "task_complete" || payload?.type === "turn_aborted";
 }
 
-async function parseRollout(filePath) {
-  const stat = await fs.stat(filePath);
-  const signature = `${stat.size}:${stat.mtimeMs}`;
-  const cached = messageCache.get(filePath);
-  const nowMs = Date.now();
-  const cachedAgeMs = nowMs - (cached?.cachedAtMs || 0);
-  if (cached?.signature === signature && (!cached.result?.status?.thinking || cachedAgeMs < ACTIVE_STATUS_CACHE_MS)) return cached.result;
+function createRolloutParseState(stat, nowMs) {
+  return {
+    eventMessages: [],
+    fallbackMessages: [],
+    toolMessages: [],
+    interactionMessages: [],
+    noticeMessages: [],
+    meta: {},
+    lineNumber: 0,
+    activeTurn: null,
+    openTurns: new Map(),
+    lastEntryAtMs: Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : nowMs,
+    assistantMessagesByTurn: new Map()
+  };
+}
 
-  const eventMessages = [];
-  const fallbackMessages = [];
-  const toolMessages = [];
-  const interactionMessages = [];
-  const noticeMessages = [];
-  let meta = {};
-  let lineNumber = 0;
-  let activeTurn = null;
-  let lastEntryAtMs = Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : nowMs;
-  const assistantMessagesByTurn = new Map();
-
-  const stream = createReadStream(filePath, { encoding: "utf8" });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-
-  for await (const line of rl) {
-    lineNumber += 1;
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line);
-      const entryAtMs = Date.parse(entry.timestamp);
-      if (Number.isFinite(entryAtMs)) lastEntryAtMs = entryAtMs;
-      if (entry.type === "session_meta") {
-        meta = { ...meta, ...(entry.payload || {}) };
-        continue;
-      }
-      if (entry.type === "event_msg") {
-        if (entry.payload?.type === "task_started") {
-          activeTurn = {
-            turnId: entry.payload.turn_id || null,
-            startedAtMs: Number(entry.payload.started_at) ? Number(entry.payload.started_at) * 1000 : Date.parse(entry.timestamp)
-          };
-          continue;
-        }
-        if (isTurnEndEvent(entry.payload)) {
-          const turnId = entry.payload.turn_id || activeTurn?.turnId || null;
-          const durationMs = Number(entry.payload.duration_ms);
-          const completedAtMs = Number(entry.payload.completed_at) ? Number(entry.payload.completed_at) * 1000 : Date.parse(entry.timestamp);
-          if (turnId && assistantMessagesByTurn.has(turnId)) {
-            const message = assistantMessagesByTurn.get(turnId);
-            if (Number.isFinite(durationMs)) message.durationMs = durationMs;
-            if (Number.isFinite(completedAtMs)) message.completedAtMs = completedAtMs;
-          }
-          if (turnId && activeTurn?.turnId === turnId) activeTurn = null;
-          continue;
-        }
-        const messageMeta = {
-          turnId: activeTurn?.turnId || null,
-          turnStartedAtMs: activeTurn?.startedAtMs || null
-        };
-        const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
-        if (hasDisplayableMessageContent(interaction)) {
-          interactionMessages.push({ ...interaction, lineNumber });
-          continue;
-        }
-        const notice = messageFromNoticeEvent(entry.timestamp, entry.payload, messageMeta);
-        if (hasDisplayableMessageContent(notice)) {
-          noticeMessages.push({ ...notice, lineNumber });
-          continue;
-        }
-        const msg = messageFromEvent(entry.timestamp, entry.payload, messageMeta);
-        if (hasDisplayableMessageContent(msg)) {
-          const message = { ...msg, lineNumber };
-          eventMessages.push(message);
-          if (message.role === "assistant" && message.turnId) assistantMessagesByTurn.set(message.turnId, message);
-        }
-        continue;
-      }
-      if (entry.type === "response_item") {
-        const messageMeta = {
-          turnId: activeTurn?.turnId || null,
-          turnStartedAtMs: activeTurn?.startedAtMs || null
-        };
-        const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
-        if (hasDisplayableMessageContent(interaction)) {
-          interactionMessages.push({ ...interaction, lineNumber });
-          continue;
-        }
-        const notice = messageFromNoticeEvent(entry.timestamp, entry.payload);
-        if (hasDisplayableMessageContent(notice)) {
-          noticeMessages.push({ ...notice, lineNumber });
-          continue;
-        }
-        const msg = messageFromResponseItem(entry.timestamp, entry.payload);
-        if (!hasDisplayableMessageContent(msg)) continue;
-        if (msg.role === "tool") toolMessages.push({ ...msg, lineNumber });
-        else fallbackMessages.push({ ...msg, lineNumber });
-      }
-    } catch {
-      fallbackMessages.push({
-        role: "system",
-        kind: "parse_error",
-        timestamp: null,
-        lineNumber,
-        content: `Could not parse JSONL line ${lineNumber}`
-      });
+function parseRolloutLine(line, state) {
+  state.lineNumber += 1;
+  if (!line.trim()) return;
+  try {
+    const entry = JSON.parse(line);
+    const entryAtMs = Date.parse(entry.timestamp);
+    if (Number.isFinite(entryAtMs)) state.lastEntryAtMs = entryAtMs;
+    if (entry.type === "session_meta") {
+      state.meta = { ...state.meta, ...(entry.payload || {}) };
+      return;
     }
+    if (entry.type === "event_msg") {
+      if (entry.payload?.type === "task_started") {
+        const turn = {
+          turnId: entry.payload.turn_id || null,
+          startedAtMs: Number(entry.payload.started_at) ? Number(entry.payload.started_at) * 1000 : Date.parse(entry.timestamp)
+        };
+        state.activeTurn = turn;
+        if (turn.turnId) state.openTurns.set(turn.turnId, turn);
+        return;
+      }
+      if (isTurnEndEvent(entry.payload)) {
+        const turnId = entry.payload.turn_id || state.activeTurn?.turnId || null;
+        const durationMs = Number(entry.payload.duration_ms);
+        const completedAtMs = Number(entry.payload.completed_at) ? Number(entry.payload.completed_at) * 1000 : Date.parse(entry.timestamp);
+        if (turnId && state.assistantMessagesByTurn.has(turnId)) {
+          const message = state.assistantMessagesByTurn.get(turnId);
+          if (Number.isFinite(durationMs)) message.durationMs = durationMs;
+          if (Number.isFinite(completedAtMs)) message.completedAtMs = completedAtMs;
+        }
+        if (turnId) state.openTurns.delete(turnId);
+        if (turnId && state.activeTurn?.turnId === turnId) state.activeTurn = null;
+        return;
+      }
+      const messageMeta = {
+        turnId: state.activeTurn?.turnId || null,
+        turnStartedAtMs: state.activeTurn?.startedAtMs || null
+      };
+      const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
+      if (hasDisplayableMessageContent(interaction)) {
+        state.interactionMessages.push({ ...interaction, lineNumber: state.lineNumber });
+        return;
+      }
+      const notice = messageFromNoticeEvent(entry.timestamp, entry.payload, messageMeta);
+      if (hasDisplayableMessageContent(notice)) {
+        state.noticeMessages.push({ ...notice, lineNumber: state.lineNumber });
+        return;
+      }
+      const msg = messageFromEvent(entry.timestamp, entry.payload, messageMeta);
+      if (hasDisplayableMessageContent(msg)) {
+        const message = { ...msg, lineNumber: state.lineNumber };
+        state.eventMessages.push(message);
+        if (message.role === "assistant" && message.turnId) state.assistantMessagesByTurn.set(message.turnId, message);
+      }
+      return;
+    }
+    if (entry.type === "response_item") {
+      const messageMeta = {
+        turnId: state.activeTurn?.turnId || null,
+        turnStartedAtMs: state.activeTurn?.startedAtMs || null
+      };
+      const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
+      if (hasDisplayableMessageContent(interaction)) {
+        state.interactionMessages.push({ ...interaction, lineNumber: state.lineNumber });
+        return;
+      }
+      const notice = messageFromNoticeEvent(entry.timestamp, entry.payload);
+      if (hasDisplayableMessageContent(notice)) {
+        state.noticeMessages.push({ ...notice, lineNumber: state.lineNumber });
+        return;
+      }
+      const msg = messageFromResponseItem(entry.timestamp, entry.payload);
+      if (!hasDisplayableMessageContent(msg)) return;
+      if (msg.role === "tool") state.toolMessages.push({ ...msg, lineNumber: state.lineNumber });
+      else state.fallbackMessages.push({ ...msg, lineNumber: state.lineNumber });
+    }
+  } catch {
+    state.fallbackMessages.push({
+      role: "system",
+      kind: "parse_error",
+      timestamp: null,
+      lineNumber: state.lineNumber,
+      content: `Could not parse JSONL line ${state.lineNumber}`
+    });
   }
+}
 
-  const chatMessages = eventMessages.length ? eventMessages : fallbackMessages;
-  const activeTurnLastUpdatedAtMs = activeTurn
-    ? Math.max(activeTurn.startedAtMs || 0, lastEntryAtMs || 0, Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0)
+function rolloutResultFromState({ filePath, stat, nowMs, state, partial = false }) {
+  const chatMessages = state.eventMessages.length ? state.eventMessages : state.fallbackMessages;
+  if (partial) {
+    const recentOpenTurn = [...state.openTurns.values()].at(-1) || null;
+    const fileRecentlyUpdated = nowMs - Math.max(state.lastEntryAtMs || 0, stat.mtimeMs || 0) < ACTIVE_STATUS_CACHE_MS * 2;
+    state.activeTurn = fileRecentlyUpdated ? recentOpenTurn : null;
+  }
+  const activeTurnLastUpdatedAtMs = state.activeTurn
+    ? Math.max(state.activeTurn.startedAtMs || 0, state.lastEntryAtMs || 0, Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0)
     : null;
-  const activeTurnStale = Boolean(activeTurn && nowMs - activeTurnLastUpdatedAtMs > ACTIVE_TURN_STALE_MS);
-  const visibleActiveTurn = activeTurnStale ? null : activeTurn;
-  for (const message of interactionMessages) {
+  const activeTurnStale = Boolean(state.activeTurn && nowMs - activeTurnLastUpdatedAtMs > ACTIVE_TURN_STALE_MS);
+  const visibleActiveTurn = activeTurnStale ? null : state.activeTurn;
+  for (const message of state.interactionMessages) {
     message.requiresDesktopAction = Boolean(visibleActiveTurn && (!message.turnId || message.turnId === visibleActiveTurn.turnId));
   }
-  const pendingInteractions = interactionMessages.filter((message) => message.requiresDesktopAction);
+  const pendingInteractions = state.interactionMessages.filter((message) => message.requiresDesktopAction);
   const activeTurnWaitMs = visibleActiveTurn?.startedAtMs ? nowMs - visibleActiveTurn.startedAtMs : 0;
-  const result = {
-    meta,
+  return {
+    meta: state.meta,
     file: filePath,
     size: stat.size,
     mtimeMs: stat.mtimeMs,
+    partial,
     status: {
       thinking: Boolean(visibleActiveTurn),
       turnId: visibleActiveTurn?.turnId || null,
@@ -2306,20 +2408,67 @@ async function parseRollout(filePath) {
       interactionRequired: pendingInteractions.length > 0,
       possibleDesktopAttention: Boolean(visibleActiveTurn && pendingInteractions.length === 0 && activeTurnWaitMs > 45_000),
       staleTurn: activeTurnStale,
-      staleTurnId: activeTurnStale ? activeTurn?.turnId || null : null,
+      staleTurnId: activeTurnStale ? state.activeTurn?.turnId || null : null,
       staleTurnLastUpdatedAtMs: activeTurnStale ? activeTurnLastUpdatedAtMs : null
     },
-    messages: dedupeInteractionMessages([...chatMessages, ...pendingInteractions, ...noticeMessages, ...toolMessages]).sort((a, b) => {
-      if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
-      return a.lineNumber - b.lineNumber;
-    })
+    messages: dedupeInteractionMessages([...chatMessages, ...pendingInteractions, ...state.noticeMessages, ...state.toolMessages]).sort(messageSortCompare)
   };
+}
+
+async function readRolloutTailLines(filePath, stat, limit) {
+  const bytes = Math.min(TAIL_ROLLOUT_MAX_BYTES, Math.max(TAIL_ROLLOUT_MIN_BYTES, normalizeMessageLimit(limit) * 24 * 1024));
+  const start = Math.max(0, stat.size - bytes);
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(stat.size - start);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    let text = buffer.subarray(0, bytesRead).toString("utf8");
+    if (start > 0) {
+      const firstNewline = text.indexOf("\n");
+      text = firstNewline >= 0 ? text.slice(firstNewline + 1) : "";
+    }
+    return text.split(/\r?\n/).filter((line) => line.trim());
+  } finally {
+    await handle.close();
+  }
+}
+
+async function parseRolloutTail(filePath, stat, limit, nowMs) {
+  const state = createRolloutParseState(stat, nowMs);
+  const lines = await readRolloutTailLines(filePath, stat, limit);
+  for (const line of lines) parseRolloutLine(line, state);
+  return rolloutResultFromState({ filePath, stat, nowMs, state, partial: true });
+}
+
+async function parseRollout(filePath, { limit = DEFAULT_MESSAGE_LIMIT, preferTail = false } = {}) {
+  const stat = await fs.stat(filePath);
+  const signature = `${stat.size}:${stat.mtimeMs}:${preferTail ? normalizeMessageLimit(limit) : "full"}`;
+  const cached = messageCache.get(filePath);
+  const nowMs = Date.now();
+  const cachedAgeMs = nowMs - (cached?.cachedAtMs || 0);
+  if (cached?.signature === signature && (!cached.result?.status?.thinking || cachedAgeMs < ACTIVE_STATUS_CACHE_MS)) return cached.result;
+
+  if (preferTail && stat.size > TAIL_ROLLOUT_MAX_BYTES) {
+    const result = await parseRolloutTail(filePath, stat, limit, nowMs);
+    messageCache.set(filePath, { signature, result, cachedAtMs: nowMs });
+    return result;
+  }
+
+  const state = createRolloutParseState(stat, nowMs);
+  const stream = createReadStream(filePath, { encoding: "utf8" });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+  for await (const line of rl) {
+    parseRolloutLine(line, state);
+  }
+
+  const result = rolloutResultFromState({ filePath, stat, nowMs, state, partial: false });
 
   messageCache.set(filePath, { signature, result, cachedAtMs: nowMs });
   return result;
 }
 
-async function getMessages(id) {
+async function getMessages(id, { limit = DEFAULT_MESSAGE_LIMIT } = {}) {
   keepIpcWarm();
   const thread = await findThread(id);
   if (!thread) {
@@ -2333,6 +2482,8 @@ async function getMessages(id) {
   const liveMessages = [...ipcInteractions, ...ipcNotices, ...serverNotices];
   const rolloutPath = resolveRolloutPath(thread.rolloutPath);
   if (!rolloutPath || !existsSync(rolloutPath)) {
+    const messages = dedupeInteractionMessages(liveMessages).sort(messageSortCompare);
+    const limited = limitMessagesForClient(messages, { thinking: false, interactionRequired: ipcInteractions.some((message) => message.requiresDesktopAction) }, limit);
     return {
       thread,
       meta: {},
@@ -2346,25 +2497,25 @@ async function getMessages(id) {
         interactionRequired: ipcInteractions.some((message) => message.requiresDesktopAction),
         possibleDesktopAttention: false
       },
-      messages: dedupeInteractionMessages(liveMessages).sort((a, b) => {
-        if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
-        return a.lineNumber - b.lineNumber;
-      })
+      ...limited
     };
   }
-  const parsed = await parseRollout(rolloutPath);
-  if (!liveMessages.length) return { thread, ...parsed };
+  const parsed = await parseRollout(rolloutPath, { limit, preferTail: true });
+  if (!liveMessages.length) {
+    const limited = limitMessagesForClient(parsed.messages, parsed.status, limit);
+    return { thread, ...parsed, ...limited };
+  }
+  const status = {
+    ...parsed.status,
+    interactionRequired: parsed.status?.interactionRequired || ipcInteractions.some((message) => message.requiresDesktopAction)
+  };
+  const messages = dedupeInteractionMessages([...parsed.messages, ...liveMessages]).sort(messageSortCompare);
+  const limited = limitMessagesForClient(messages, status, limit);
   return {
     thread,
     ...parsed,
-    status: {
-      ...parsed.status,
-      interactionRequired: parsed.status?.interactionRequired || ipcInteractions.some((message) => message.requiresDesktopAction)
-    },
-    messages: dedupeInteractionMessages([...parsed.messages, ...liveMessages]).sort((a, b) => {
-      if (a.timestamp && b.timestamp) return String(a.timestamp).localeCompare(String(b.timestamp));
-      return a.lineNumber - b.lineNumber;
-    })
+    status,
+    ...limited
   };
 }
 
@@ -3165,7 +3316,7 @@ const server = http.createServer(async (req, res) => {
     const match = url.pathname.match(/^\/api\/threads\/([0-9a-fA-F-]{20,})\/messages$/);
     if (req.method === "GET" && match) {
       if (!requireAuthorized(req, res, url)) return;
-      sendJson(res, 200, await getMessages(match[1]));
+      sendJson(res, 200, await getMessages(match[1], { limit: url.searchParams.get("limit") }));
       return;
     }
     if (req.method !== "GET") {
