@@ -1499,7 +1499,7 @@ async function getThreads({ preserveIds = [] } = {}) {
       ...rows,
       ...recentRows.filter((row) => {
         const id = String(row.id || "");
-        return !isArchivedThread(row) && !excludedIds.has(id) && !seen.has(id);
+        return !isArchivedThread(row) && !excludedIds.has(id) && !seen.has(id) && row.rolloutPath;
       })
     ].sort((a, b) => {
       const updatedA = Number(a.updatedAtMs) || 0;
