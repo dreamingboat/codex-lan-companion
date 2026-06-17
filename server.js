@@ -1415,16 +1415,32 @@ function normalizeRateLimits(rateLimits, updatedAt) {
 
 async function latestRolloutPaths(limit = 8) {
   const { stateDb } = codexPaths((await refreshCodexHomeContext()).home);
-  if (!existsSync(stateDb)) return [];
-  const rows = await runSqlJson(`
-    SELECT id, rollout_path AS rolloutPath
-    FROM threads
-    WHERE rollout_path IS NOT NULL
-    ORDER BY updated_at_ms DESC, updated_at DESC
-    LIMIT 200;
-  `);
-  const filtered = await filterRowsForCurrentAccount(rows);
-  return filtered.rows
+  const rows = [];
+  const seen = new Set();
+  if (existsSync(stateDb)) {
+    const stateRows = await runSqlJson(`
+      SELECT id, rollout_path AS rolloutPath, updated_at_ms AS updatedAtMs
+      FROM threads
+      WHERE rollout_path IS NOT NULL
+      ORDER BY updated_at_ms DESC, updated_at DESC
+      LIMIT 200;
+    `);
+    const filtered = await filterRowsForCurrentAccount(stateRows);
+    for (const row of filtered.rows) {
+      const id = String(row.id || "");
+      if (id) seen.add(id);
+      rows.push(row);
+    }
+  }
+  const indexFiltered = await filterRowsForCurrentAccount(await readSessionIndexRows());
+  for (const row of indexFiltered.rows) {
+    const id = String(row.id || "");
+    if (!row.rolloutPath || seen.has(id)) continue;
+    seen.add(id);
+    rows.push(row);
+  }
+  return rows
+    .sort((a, b) => (Number(b.updatedAtMs) || 0) - (Number(a.updatedAtMs) || 0))
     .slice(0, Number(limit) || 8)
     .map((row) => {
       try {
@@ -1448,7 +1464,10 @@ async function readLatestRateLimits() {
       try {
         const entry = JSON.parse(line);
         const rateLimits = entry.type === "event_msg" && entry.payload?.type === "token_count" ? entry.payload.rate_limits : null;
-        if (rateLimits) return normalizeRateLimits(rateLimits, entry.timestamp);
+        if (rateLimits) {
+          const normalized = normalizeRateLimits(rateLimits, entry.timestamp);
+          if (normalized) return normalized;
+        }
       } catch {
         // Skip malformed historical lines.
       }
