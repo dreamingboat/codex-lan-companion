@@ -117,11 +117,14 @@ const SYSTEM_BOOT_AT_ISO = new Date(SYSTEM_BOOT_AT_MS).toISOString();
 const START_SOURCE = process.env.XPC_SERVICE_NAME ? `launchd:${process.env.XPC_SERVICE_NAME}` : "terminal";
 const IS_INTERACTIVE_TTY = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const SLOW_REQUEST_MS = 1000;
+const SLOW_POLL_REQUEST_MS = 5000;
 const SLOW_SQL_MS = 750;
 const THREADS_CACHE_MS = 1500;
+const SESSION_ROLLOUT_PATH_CACHE_MS = 5000;
 const AUTH_WARN_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const authWarnLogState = new Map();
 let threadsCache = null;
+let sessionRolloutPathCache = null;
 
 function normalizeLogPath(pathname) {
   return String(pathname || "/").replace(/\/api\/threads\/[0-9a-fA-F-]{20,}\/messages$/, "/api/threads/:id/messages");
@@ -139,6 +142,14 @@ function shouldLogHttpEvent({ method, pathname, statusCode, level }) {
   }
   state.suppressed += 1;
   return false;
+}
+
+function slowRequestThresholdMs(method, pathname) {
+  const normalized = normalizeLogPath(pathname);
+  if (method === "GET" && (normalized === "/api/threads" || normalized === "/api/threads/:id/messages" || normalized === "/api/account")) {
+    return SLOW_POLL_REQUEST_MS;
+  }
+  return SLOW_REQUEST_MS;
 }
 
 function summarizeSql(sql) {
@@ -271,6 +282,11 @@ function isSqliteLocked(error) {
   return String(error?.message || error || "").toLowerCase().includes("database is locked");
 }
 
+function isSqliteResourceTransient(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return /\b(eagain|emfile|enfile)\b/.test(message);
+}
+
 function codexPaths(home = codexHomeState.home) {
   const root = path.resolve(home || INITIAL_CODEX_HOME);
   return {
@@ -278,6 +294,8 @@ function codexPaths(home = codexHomeState.home) {
     stateDb: path.join(root, "state_5.sqlite"),
     logsDb: path.join(root, "logs_2.sqlite"),
     sessionIndex: path.join(root, "session_index.jsonl"),
+    sessionsDir: path.join(root, "sessions"),
+    archivedSessionsDir: path.join(root, "archived_sessions"),
     authFile: path.join(root, "auth.json")
   };
 }
@@ -689,13 +707,13 @@ function runSqlJsonAttempt(sql, dbPath = codexPaths().stateDb) {
 async function runSqlJsonFromDb(dbPath, sql) {
   const work = async () => {
     let lastError;
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
         return await runSqlJsonAttempt(sql, dbPath);
       } catch (error) {
         lastError = error;
-        if (!isSqliteLocked(error)) throw error;
-        await sleep(150 * (attempt + 1));
+        if (!isSqliteLocked(error) && !isSqliteResourceTransient(error)) throw error;
+        await sleep(150 * (attempt + 1) + (isSqliteResourceTransient(error) ? 100 : 0));
       }
     }
     throw lastError;
@@ -1351,7 +1369,7 @@ async function filterRowsForCurrentAccount(rows, idSelector = (row) => row.id, p
   return {
     rows: rows.filter((row) => {
       const id = String(idSelector(row) || "");
-      return filter.allowedThreadIds.has(id) || desktopVisibleIds.has(id) || preserved.has(id);
+      return filter.allowedThreadIds.has(id) || desktopVisibleIds.has(id) || preserved.has(id) || !filter.mappedThreadIds.has(id);
     }),
     accountFiltered: true,
     accountEmail: filter.currentEmail
@@ -1458,6 +1476,89 @@ async function readSessionIndexTitleMap() {
   return titles;
 }
 
+async function findSessionRolloutPathsInDir(dir, home, depth = 0) {
+  if (depth > 8) return [];
+  let entries = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const matches = [];
+  for (const entry of entries) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      matches.push(...(await findSessionRolloutPathsInDir(entryPath, home, depth + 1)));
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    const id = entry.name.match(/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/)?.[1];
+    if (!id) continue;
+    let mtimeMs = 0;
+    try {
+      mtimeMs = (await fs.stat(entryPath)).mtimeMs;
+    } catch {
+      // Keep the path even if stat races with Codex writing/removing a file.
+    }
+    matches.push({ id, rolloutPath: path.relative(home, entryPath), mtimeMs });
+  }
+  return matches;
+}
+
+async function readSessionRolloutPathMap() {
+  const homeState = await refreshCodexHomeContext();
+  const { home, sessionsDir, archivedSessionsDir } = codexPaths(homeState.home);
+  const cacheKey = `${homeState.home}:${homeState.version}`;
+  const now = Date.now();
+  if (sessionRolloutPathCache?.key === cacheKey && now - sessionRolloutPathCache.cachedAt < SESSION_ROLLOUT_PATH_CACHE_MS) {
+    return sessionRolloutPathCache.value;
+  }
+  const rolloutRows = [
+    ...(await findSessionRolloutPathsInDir(sessionsDir, home)),
+    ...(await findSessionRolloutPathsInDir(archivedSessionsDir, home))
+  ];
+  const paths = new Map();
+  for (const row of rolloutRows) {
+    const existing = paths.get(row.id);
+    if (!existing || row.mtimeMs >= existing.mtimeMs) paths.set(row.id, row);
+  }
+  const value = new Map([...paths.entries()].map(([id, row]) => [id, row.rolloutPath]));
+  sessionRolloutPathCache = { key: cacheKey, cachedAt: now, value };
+  return value;
+}
+
+async function readSessionIndexRows() {
+  const { sessionIndex } = codexPaths((await refreshCodexHomeContext()).home);
+  if (!existsSync(sessionIndex)) return [];
+  const content = await fs.readFile(sessionIndex, "utf8");
+  const rolloutPaths = await readSessionRolloutPathMap();
+  const rowsById = new Map();
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      const id = String(row.id || "").trim();
+      if (!id) continue;
+      const title = String(row.thread_name || row.title || "").trim();
+      rowsById.set(id, {
+        id,
+        title: title || "Untitled",
+        rolloutPath: rolloutPaths.get(id) || null,
+        createdAtMs: null,
+        updatedAtMs: Date.parse(row.updated_at),
+        archived: false,
+        preview: "",
+        cwd: "",
+        model: "",
+        source: "session-index"
+      });
+    } catch {
+      // Ignore malformed historical index lines.
+    }
+  }
+  return [...rowsById.values()].sort((a, b) => (Number(b.updatedAtMs) || 0) - (Number(a.updatedAtMs) || 0));
+}
+
 function displayThreadTitle(row, sessionIndexTitles) {
   const indexedTitle = sessionIndexTitles?.get(String(row.id || ""));
   return indexedTitle || row.title || "Untitled";
@@ -1518,35 +1619,26 @@ async function getThreads({ preserveIds = [] } = {}) {
     `);
     const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
     const archivedIds = new Set(rows.filter(isArchivedThread).map((row) => String(row.id || "")));
-    return appendRecentIpcRows(
-      filtered.rows.filter((row) => !isArchivedThread(row)).map((row) => ({
-        id: row.id,
-        title: displayThreadTitle(row, sessionIndexTitles),
-        rolloutPath: row.rolloutPath,
-        createdAtMs: row.createdAtMs,
-        updatedAtMs: row.updatedAtMs,
-        archived: Boolean(row.archived),
-        preview: row.preview || "",
-        cwd: row.cwd || "",
-        model: row.model || ""
-      })),
-      archivedIds
-    );
+    const stateRows = filtered.rows.filter((row) => !isArchivedThread(row)).map((row) => ({
+      id: row.id,
+      title: displayThreadTitle(row, sessionIndexTitles),
+      rolloutPath: row.rolloutPath,
+      createdAtMs: row.createdAtMs,
+      updatedAtMs: row.updatedAtMs,
+      archived: Boolean(row.archived),
+      preview: row.preview || "",
+      cwd: row.cwd || "",
+      model: row.model || ""
+    }));
+    const seen = new Set(stateRows.map((row) => String(row.id || "")));
+    const indexFiltered = await filterRowsForCurrentAccount(await readSessionIndexRows(), (row) => row.id, preserveIds);
+    const indexRows = indexFiltered.rows.filter((row) => !seen.has(String(row.id || "")) && !archivedIds.has(String(row.id || "")));
+    return appendRecentIpcRows([...stateRows, ...indexRows], archivedIds);
   }
 
-  const content = await fs.readFile(sessionIndex, "utf8");
-  const rows = content
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line))
-    .reverse();
+  const rows = await readSessionIndexRows();
   const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
-  return appendRecentIpcRows(filtered.rows.map((row) => ({
-      id: row.id,
-      title: row.thread_name || "Untitled",
-      rolloutPath: null,
-      updatedAtMs: Date.parse(row.updated_at)
-    })));
+  return appendRecentIpcRows(filtered.rows);
 }
 
 async function findThread(id) {
@@ -1563,6 +1655,8 @@ async function findThread(id) {
     LIMIT 1;
   `);
   if (!rows[0]) {
+    const indexedThread = (await readSessionIndexRows()).find((row) => row.id === String(id));
+    if (indexedThread) return indexedThread;
     return recentIpcThread;
   }
   return { ...rows[0], title: displayThreadTitle(rows[0], sessionIndexTitles) };
@@ -3209,7 +3303,7 @@ const server = http.createServer(async (req, res) => {
   const requestMethod = req.method || "UNKNOWN";
   res.once("finish", () => {
     const durationMs = Math.round(performance.now() - requestStartedAt);
-    if (res.statusCode >= 400 || durationMs >= SLOW_REQUEST_MS) {
+    if (res.statusCode >= 400 || durationMs >= slowRequestThresholdMs(requestMethod, url.pathname)) {
       const level = res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "slow";
       const message = `[http:${level}] ${requestMethod} ${url.pathname} ${res.statusCode} ${durationMs}ms`;
       const logDecision = shouldLogHttpEvent({ method: requestMethod, pathname: url.pathname, statusCode: res.statusCode, level });
