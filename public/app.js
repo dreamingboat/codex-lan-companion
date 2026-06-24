@@ -38,7 +38,11 @@ const state = {
   skillQuery: "",
   skillTriggerStart: -1,
   skillActiveIndex: 0,
-  selectedSkills: []
+  selectedSkills: [],
+  threadSyncBackoffMs: 0,
+  messageSyncBackoffMs: 0,
+  accountSyncBackoffMs: 0,
+  lastSyncActivityAt: Date.now()
 };
 
 const MESSAGE_SYNC_LIMIT = 80;
@@ -46,6 +50,11 @@ const THREAD_SYNC_INTERVAL_MS = 12000;
 const MESSAGE_SYNC_THINKING_MS = 2000;
 const MESSAGE_SYNC_IDLE_MS = 6000;
 const ACCOUNT_SYNC_INTERVAL_MS = 30000;
+const THREAD_SYNC_BACKOFF_MAX_MS = 60000;
+const MESSAGE_SYNC_BACKOFF_MAX_MS = 30000;
+const ACCOUNT_SYNC_BACKOFF_MAX_MS = 120000;
+const IMAGE_INPUT_ACCEPT = "image/*";
+const IMAGE_FILE_INPUT_ACCEPT = "*/*";
 
 const els = {
   shell: document.querySelector("#shell"),
@@ -69,8 +78,12 @@ const els = {
   skillMentionTray: document.querySelector("#skillMentionTray"),
   skillMentionMenu: document.querySelector("#skillMentionMenu"),
   imageInput: document.querySelector("#imageInput"),
+  imageFileInput: document.querySelector("#imageFileInput"),
+  imagePickerMenu: document.querySelector("#imagePickerMenu"),
   attachmentTray: document.querySelector("#attachmentTray"),
   attachButton: document.querySelector("#attachButton"),
+  pickPhotoButton: document.querySelector("#pickPhotoButton"),
+  pickFileButton: document.querySelector("#pickFileButton"),
   sendButton: document.querySelector("#sendButton"),
   sendStatus: document.querySelector("#sendStatus"),
   accountSummary: document.querySelector("#accountSummary"),
@@ -133,9 +146,11 @@ const I18N = {
     stop: "停止",
     stopCurrentTask: "停止当前任务",
     addImage: "添加图片",
+    pickPhoto: "相册",
+    pickFile: "文件浏览",
     removeImage: "移除图片",
     imageTooLarge: "图片过大，单张不能超过 {size} MB。",
-    imageUnsupported: "不支持此图片格式，请换 JPEG、PNG 或 WebP。",
+    imageUnsupported: "不支持此图片格式，请换 JPEG、PNG、WebP、GIF、HEIC 或 BMP。",
     imageDimensionsInvalid: "图片尺寸不支持，宽高需在 {min}-{max}px 之间。",
     tooManyImages: "最多只能添加 {count} 张图片。",
     sendToCodex: "发送到当前 Codex 窗口",
@@ -224,9 +239,11 @@ const I18N = {
     stop: "Stop",
     stopCurrentTask: "Stop current task",
     addImage: "Add image",
+    pickPhoto: "Photos",
+    pickFile: "Files",
     removeImage: "Remove image",
     imageTooLarge: "Image is too large. Each image must be under {size} MB.",
-    imageUnsupported: "Unsupported image format. Use JPEG, PNG, or WebP.",
+    imageUnsupported: "Unsupported image format. Use JPEG, PNG, WebP, GIF, HEIC, or BMP.",
     imageDimensionsInvalid: "Unsupported image dimensions. Width and height must be {min}-{max}px.",
     tooManyImages: "You can attach up to {count} images.",
     sendToCodex: "Send to current Codex window",
@@ -342,6 +359,8 @@ function applyStaticText() {
   els.skillPickerButton.setAttribute("aria-label", t("skillPickerTitle"));
   els.attachButton.setAttribute("title", t("addImage"));
   els.attachButton.setAttribute("aria-label", t("addImage"));
+  els.pickPhotoButton.textContent = t("pickPhoto");
+  els.pickFileButton.textContent = t("pickFile");
   els.sendButton.setAttribute("title", t("send"));
   els.sendButton.setAttribute("aria-label", t("send"));
   els.composerInput.placeholder = t("sendToCodex");
@@ -649,7 +668,30 @@ function mimeTypeForFile(file) {
   if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
   if (name.endsWith(".png")) return "image/png";
   if (name.endsWith(".webp")) return "image/webp";
+  if (name.endsWith(".gif")) return "image/gif";
+  if (name.endsWith(".heic")) return "image/heic";
+  if (name.endsWith(".heif")) return "image/heif";
+  if (name.endsWith(".bmp")) return "image/bmp";
+  if (name.endsWith(".tif") || name.endsWith(".tiff")) return "image/tiff";
   return "";
+}
+
+function configureImageInput() {
+  if (els.imageInput) els.imageInput.accept = IMAGE_INPUT_ACCEPT;
+  if (els.imageFileInput) els.imageFileInput.accept = IMAGE_FILE_INPUT_ACCEPT;
+}
+
+function closeImagePickerMenu() {
+  if (!els.imagePickerMenu) return;
+  els.imagePickerMenu.hidden = true;
+  els.attachButton.setAttribute("aria-expanded", "false");
+}
+
+function toggleImagePickerMenu() {
+  if (!els.imagePickerMenu) return;
+  const nextOpen = els.imagePickerMenu.hidden;
+  els.imagePickerMenu.hidden = !nextOpen;
+  els.attachButton.setAttribute("aria-expanded", String(nextOpen));
 }
 
 function loadImageFromFile(file) {
@@ -1119,7 +1161,9 @@ async function loadAccount() {
     state.account = await fetchJson("/api/account");
     applyHomeContext(state.account);
     renderAccount();
+    noteSyncSuccess("account");
   } catch {
+    noteSyncFailure("account", ACCOUNT_SYNC_INTERVAL_MS, ACCOUNT_SYNC_BACKOFF_MAX_MS);
     state.account = null;
     renderAccount();
   }
@@ -1135,6 +1179,24 @@ async function fetchJson(url) {
     throw error;
   }
   return data;
+}
+
+function syncDelay(baseMs, backoffMs = 0) {
+  const hiddenMultiplier = document.hidden ? 4 : 1;
+  return Math.max(baseMs * hiddenMultiplier, baseMs + backoffMs);
+}
+
+function nextBackoff(currentMs, baseMs, maxMs) {
+  return Math.min(maxMs, currentMs ? currentMs * 2 : baseMs);
+}
+
+function noteSyncSuccess(kind) {
+  state[`${kind}SyncBackoffMs`] = 0;
+  state.lastSyncActivityAt = Date.now();
+}
+
+function noteSyncFailure(kind, baseMs, maxMs) {
+  state[`${kind}SyncBackoffMs`] = nextBackoff(state[`${kind}SyncBackoffMs`] || 0, baseMs, maxMs);
 }
 
 async function loadPlugins() {
@@ -1620,6 +1682,7 @@ async function loadThreads() {
     state.selectedId = null;
   }
   renderThreads();
+  noteSyncSuccess("thread");
 }
 
 function renderTransientSyncError(error) {
@@ -1662,9 +1725,11 @@ async function loadMessages(force = false, threadId = state.selectedId) {
       }
       updateScrollToBottomButton();
     }
+    noteSyncSuccess("message");
   } catch (error) {
     if (state.selectedId !== threadId || state.activeMessageRequest !== request) return;
     if (error.status === 401) throw error;
+    noteSyncFailure("message", state.threadStatus?.thinking ? MESSAGE_SYNC_THINKING_MS : MESSAGE_SYNC_IDLE_MS, MESSAGE_SYNC_BACKOFF_MAX_MS);
     if (state.messagesSignature) {
       renderTransientSyncError(error);
     } else {
@@ -1686,6 +1751,7 @@ async function refresh(forceMessages = false) {
       return;
     }
     els.threadCount.textContent = t("syncFailed");
+    noteSyncFailure("thread", THREAD_SYNC_INTERVAL_MS, THREAD_SYNC_BACKOFF_MAX_MS);
     if (state.threads.length || state.messagesSignature) {
       renderTransientSyncError(error);
     } else {
@@ -1697,6 +1763,45 @@ async function refresh(forceMessages = false) {
 function refreshSoon(delayMs = 700) {
   setTimeout(() => {
     if (shouldSync()) refresh(true);
+  }, delayMs);
+}
+
+function scheduleThreadSync(delayMs = syncDelay(THREAD_SYNC_INTERVAL_MS, state.threadSyncBackoffMs)) {
+  setTimeout(async () => {
+    try {
+      if (shouldSync()) await loadThreads();
+    } catch (error) {
+      if (error.status === 401) handleUnauthorized(error);
+      else noteSyncFailure("thread", THREAD_SYNC_INTERVAL_MS, THREAD_SYNC_BACKOFF_MAX_MS);
+    } finally {
+      scheduleThreadSync();
+    }
+  }, delayMs);
+}
+
+function scheduleMessageSync(delayMs = syncDelay(state.threadStatus?.thinking ? MESSAGE_SYNC_THINKING_MS : MESSAGE_SYNC_IDLE_MS, state.messageSyncBackoffMs)) {
+  setTimeout(async () => {
+    try {
+      if (shouldSync()) await loadMessages(false);
+    } catch (error) {
+      if (error.status === 401) handleUnauthorized(error);
+      else noteSyncFailure("message", state.threadStatus?.thinking ? MESSAGE_SYNC_THINKING_MS : MESSAGE_SYNC_IDLE_MS, MESSAGE_SYNC_BACKOFF_MAX_MS);
+    } finally {
+      scheduleMessageSync();
+    }
+  }, delayMs);
+}
+
+function scheduleAccountSync(delayMs = syncDelay(ACCOUNT_SYNC_INTERVAL_MS, state.accountSyncBackoffMs)) {
+  setTimeout(async () => {
+    try {
+      if (shouldSync() && state.accountExpanded) await loadAccount();
+    } catch (error) {
+      if (error.status === 401) handleUnauthorized(error);
+      else noteSyncFailure("account", ACCOUNT_SYNC_INTERVAL_MS, ACCOUNT_SYNC_BACKOFF_MAX_MS);
+    } finally {
+      scheduleAccountSync();
+    }
   }, delayMs);
 }
 
@@ -1893,6 +1998,13 @@ document.addEventListener("click", (event) => {
   ) {
     closeSkillMentionMenu();
   }
+  if (
+    !els.imagePickerMenu.hidden &&
+    !els.imagePickerMenu.contains(event.target) &&
+    !els.attachButton.contains(event.target)
+  ) {
+    closeImagePickerMenu();
+  }
 });
 
 els.authReveal.addEventListener("click", () => {
@@ -2057,13 +2169,27 @@ els.skillMentionTray?.addEventListener("click", (event) => {
 els.attachButton.addEventListener("click", () => {
   if (els.attachButton.disabled) return;
   closePluginMentionMenu();
+  closeSkillMentionMenu();
+  toggleImagePickerMenu();
+});
+
+els.pickPhotoButton.addEventListener("click", () => {
+  closeImagePickerMenu();
   els.imageInput.click();
 });
 
-els.imageInput.addEventListener("change", async (event) => {
+els.pickFileButton.addEventListener("click", () => {
+  closeImagePickerMenu();
+  els.imageFileInput.click();
+});
+
+async function handleImageInputChange(event) {
   await addImageFiles(event.target.files);
   event.target.value = "";
-});
+}
+
+els.imageInput.addEventListener("change", handleImageInputChange);
+els.imageFileInput.addEventListener("change", handleImageInputChange);
 
 els.attachmentTray.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-attachment-id]");
@@ -2138,6 +2264,7 @@ els.composerForm.addEventListener("submit", async (event) => {
     if (!thinking && /image/i.test(error.message || "")) {
       state.imageAttachments = [];
       els.imageInput.value = "";
+      els.imageFileInput.value = "";
       renderImageAttachments();
     }
     els.sendStatus.textContent = t(thinking ? "interruptFailed" : "sendFailed", { message: error.message });
@@ -2149,21 +2276,18 @@ els.composerForm.addEventListener("submit", async (event) => {
 });
 
 applyStaticText();
+configureImageInput();
 initAuthToken();
 initResponsiveSidebar();
-refresh(true);
-loadAccount();
-setInterval(() => {
-  if (shouldSync()) loadThreads().catch(handleUnauthorized);
-}, THREAD_SYNC_INTERVAL_MS);
-function scheduleMessageSync() {
-  const delay = state.threadStatus?.thinking ? MESSAGE_SYNC_THINKING_MS : MESSAGE_SYNC_IDLE_MS;
-  setTimeout(async () => {
-    if (shouldSync()) await loadMessages(false).catch(handleUnauthorized);
-    scheduleMessageSync();
-  }, delay);
+
+async function bootstrap() {
+  await refresh(true);
+  scheduleThreadSync();
+  scheduleMessageSync();
+  scheduleAccountSync();
+  setTimeout(() => {
+    if (shouldSync()) loadAccount();
+  }, 500);
 }
-scheduleMessageSync();
-setInterval(() => {
-  if (shouldSync()) loadAccount().catch(handleUnauthorized);
-}, ACCOUNT_SYNC_INTERVAL_MS);
+
+bootstrap();

@@ -119,12 +119,18 @@ const IS_INTERACTIVE_TTY = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const SLOW_REQUEST_MS = 1000;
 const SLOW_POLL_REQUEST_MS = 5000;
 const SLOW_SQL_MS = 750;
-const THREADS_CACHE_MS = 1500;
+const ACCOUNT_CACHE_MS = 60 * 1000;
+const ACCOUNT_STALE_CACHE_MS = 5 * 60 * 1000;
+const THREADS_CACHE_MS = 8000;
+const THREADS_STALE_CACHE_MS = 60 * 1000;
+const THREAD_ACCOUNT_CACHE_MS = 5 * 60 * 1000;
 const SESSION_ROLLOUT_PATH_CACHE_MS = 5000;
 const AUTH_WARN_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const authWarnLogState = new Map();
 let threadsCache = null;
 let sessionRolloutPathCache = null;
+let accountInfoInFlight = null;
+let threadsInFlight = null;
 
 function normalizeLogPath(pathname) {
   return String(pathname || "/").replace(/\/api\/threads\/[0-9a-fA-F-]{20,}\/messages$/, "/api/threads/:id/messages");
@@ -158,6 +164,8 @@ function summarizeSql(sql) {
 
 function clearThreadsCache() {
   threadsCache = null;
+  threadsInFlight = null;
+  accountInfoInFlight = null;
 }
 
 process.on("uncaughtException", (error) => {
@@ -219,7 +227,8 @@ const recentNotices = [];
 let codexIpcClient = null;
 let accountCache = null;
 let threadAccountCache = null;
-let sqliteQueue = Promise.resolve();
+let threadAccountRefreshInFlight = null;
+const sqliteQueues = new Map();
 let codexHomeState = {
   home: path.resolve(INITIAL_CODEX_HOME),
   version: 1,
@@ -522,7 +531,11 @@ async function getSkills() {
 
 function clearHomeScopedCaches() {
   accountCache = null;
+  accountInfoInFlight = null;
   threadAccountCache = null;
+  threadAccountRefreshInFlight = null;
+  threadsCache = null;
+  threadsInFlight = null;
   messageCache.clear();
   recentNotices.splice(0, recentNotices.length);
   codexIpcClient?.clearHomeScopedState?.();
@@ -718,8 +731,10 @@ async function runSqlJsonFromDb(dbPath, sql) {
     }
     throw lastError;
   };
-  const next = sqliteQueue.then(work, work);
-  sqliteQueue = next.catch(() => {});
+  const queueKey = path.resolve(dbPath);
+  const queue = sqliteQueues.get(queueKey) || Promise.resolve();
+  const next = queue.then(work, work);
+  sqliteQueues.set(queueKey, next.catch(() => {}));
   return next;
 }
 
@@ -1293,6 +1308,68 @@ function extractTelemetryAccount(body) {
   };
 }
 
+function accountFilterFromMap(latestByThread, currentEmail) {
+  const knownEmails = new Set([...latestByThread.values()].map((account) => account.email).filter(Boolean));
+  if (!knownEmails.size) return null;
+
+  const allowedThreadIds = new Set(
+    [...latestByThread.entries()].filter(([, account]) => account.email === currentEmail).map(([threadId]) => threadId)
+  );
+  return {
+    currentEmail,
+    knownEmails,
+    allowedThreadIds,
+    mappedThreadIds: new Set(latestByThread.keys()),
+    active: knownEmails.has(currentEmail) || allowedThreadIds.size > 0
+  };
+}
+
+async function refreshThreadAccountMap(homeState, logsDb, threadIds) {
+  const existing =
+    threadAccountCache?.home === homeState.home && threadAccountCache?.version === homeState.version
+      ? threadAccountCache
+      : null;
+  const requested = [...new Set(threadIds.map((id) => String(id || "").trim()).filter(Boolean))];
+  const valuesSql = requested.map((id) => `('${sqlString(id)}')`).join(",");
+  // Probe each thread through the indexed thread_id timeline; scanning all telemetry bodies is prohibitively slow on large logs databases.
+  const rows = requested.length
+    ? await runSqlJsonFromDb(
+        logsDb,
+        `
+          WITH requested(thread_id) AS (VALUES ${valuesSql})
+          SELECT requested.thread_id AS threadId,
+                 (
+                   SELECT logs.feedback_log_body
+                   FROM logs
+                   WHERE logs.thread_id = requested.thread_id
+                     AND logs.target = 'codex_otel.log_only'
+                   ORDER BY logs.ts DESC, logs.ts_nanos DESC, logs.id DESC
+                   LIMIT 1
+                 ) AS body
+          FROM requested;
+        `
+      )
+    : [];
+  const latestByThread = new Map(existing?.latestByThread || []);
+  const checkedThreadIds = new Set(existing?.checkedThreadIds || []);
+  for (const row of rows) {
+    const threadId = String(row.threadId || "").trim();
+    if (!threadId) continue;
+    checkedThreadIds.add(threadId);
+    const account = extractTelemetryAccount(row.body);
+    if (account?.email) latestByThread.set(threadId, account);
+  }
+
+  threadAccountCache = {
+    home: homeState.home,
+    version: homeState.version,
+    latestByThread,
+    checkedThreadIds,
+    cachedAt: Date.now()
+  };
+  return threadAccountCache;
+}
+
 async function readThreadAccountFilter(threadIds = []) {
   const homeState = await refreshCodexHomeContext();
   const profile = await readAuthProfile();
@@ -1302,62 +1379,26 @@ async function readThreadAccountFilter(threadIds = []) {
   const { logsDb } = codexPaths(homeState.home);
   if (!existsSync(logsDb)) return null;
 
-  const requestedThreadIds = [...new Set(threadIds.map((id) => String(id || "").trim()).filter(Boolean))];
-  const idsKey = requestedThreadIds.length ? requestedThreadIds.slice().sort().join(",") : "global";
-  const cacheKey = `${homeState.home}:${homeState.version}:${currentEmail}:${idsKey}`;
   const now = Date.now();
-  if (threadAccountCache?.key === cacheKey && now - threadAccountCache.cachedAt < 5000) {
-    return threadAccountCache.value;
+  const cached =
+    threadAccountCache?.home === homeState.home && threadAccountCache?.version === homeState.version
+      ? threadAccountCache
+      : null;
+  const requested = [...new Set(threadIds.map((id) => String(id || "").trim()).filter(Boolean))];
+  const missing = requested.filter((id) => !cached?.checkedThreadIds?.has(id));
+  if (cached && !missing.length && now - cached.cachedAt < THREAD_ACCOUNT_CACHE_MS) {
+    return accountFilterFromMap(cached.latestByThread, currentEmail);
   }
 
-  const idList = requestedThreadIds.map((id) => `'${sqlString(id)}'`).join(",");
-  const rowsSql = requestedThreadIds.length
-    ? `
-      SELECT logs.thread_id AS threadId, logs.feedback_log_body AS body
-      FROM logs
-      JOIN (
-        SELECT thread_id, MAX(id) AS latestId
-        FROM logs
-        WHERE thread_id IN (${idList})
-          AND feedback_log_body LIKE '%user.email="%'
-        GROUP BY thread_id
-      ) latest
-        ON logs.thread_id = latest.thread_id
-       AND logs.id = latest.latestId
-      ORDER BY logs.id DESC;
-    `
-    : `
-      SELECT thread_id AS threadId, feedback_log_body AS body
-      FROM logs
-      WHERE thread_id IS NOT NULL
-        AND feedback_log_body LIKE '%user.email="%'
-      ORDER BY id DESC
-      LIMIT 12000;
-    `;
-  const rows = await runSqlJsonFromDb(logsDb, rowsSql);
-  const latestByThread = new Map();
-  for (const row of rows) {
-    const threadId = String(row.threadId || "").trim();
-    if (!threadId || latestByThread.has(threadId)) continue;
-    const account = extractTelemetryAccount(row.body);
-    if (account?.email) latestByThread.set(threadId, account);
+  if (threadAccountRefreshInFlight) {
+    await threadAccountRefreshInFlight;
+    return readThreadAccountFilter(requested);
   }
-
-  const knownEmails = new Set([...latestByThread.values()].map((account) => account.email).filter(Boolean));
-  if (!knownEmails.size) return null;
-
-  const allowedThreadIds = new Set(
-    [...latestByThread.entries()].filter(([, account]) => account.email === currentEmail).map(([threadId]) => threadId)
-  );
-  const value = {
-    currentEmail,
-    knownEmails,
-    allowedThreadIds,
-    mappedThreadIds: new Set(latestByThread.keys()),
-    active: knownEmails.has(currentEmail) || allowedThreadIds.size > 0
-  };
-  threadAccountCache = { key: cacheKey, cachedAt: now, value };
-  return value;
+  threadAccountRefreshInFlight = refreshThreadAccountMap(homeState, logsDb, missing.length ? missing : requested).finally(() => {
+    threadAccountRefreshInFlight = null;
+  });
+  const refreshed = await threadAccountRefreshInFlight;
+  return accountFilterFromMap(refreshed.latestByThread, currentEmail);
 }
 
 async function filterRowsForCurrentAccount(rows, idSelector = (row) => row.id, preserveIds = []) {
@@ -1589,28 +1630,57 @@ function isArchivedThread(row) {
 
 async function getAccountInfo() {
   const now = Date.now();
-  if (accountCache && now - accountCache.cachedAt < 15000) return accountCache.value;
+  if (accountCache && now - accountCache.cachedAt < ACCOUNT_CACHE_MS) return accountCache.value;
+  if (accountInfoInFlight) return accountInfoInFlight;
 
-  const profile = await readAuthProfile();
-  const usage = await readLatestRateLimits();
-  const plan = usage?.planType || profile.tokenPlan || "";
-  const value = {
-    user: {
-      name: profile.name,
-      email: profile.email,
-      label: profile.name || profile.email || "Codex"
-    },
-    plan: {
-      type: String(plan || "").toLowerCase(),
-      label: displayPlanName(plan)
-    },
-    usage
-  };
-  accountCache = { cachedAt: now, value };
-  return value;
+  accountInfoInFlight = (async () => {
+    try {
+      const profile = await readAuthProfile();
+      const usage = await readLatestRateLimits();
+      const plan = usage?.planType || profile.tokenPlan || "";
+      const value = {
+        user: {
+          name: profile.name,
+          email: profile.email,
+          label: profile.name || profile.email || "Codex"
+        },
+        plan: {
+          type: String(plan || "").toLowerCase(),
+          label: displayPlanName(plan)
+        },
+        usage
+      };
+      accountCache = { cachedAt: Date.now(), value };
+      return value;
+    } catch (error) {
+      if (accountCache && Date.now() - accountCache.cachedAt < ACCOUNT_STALE_CACHE_MS) {
+        logError(`[cache:stale] GET /api/account using cached account after refresh failed: ${error?.message || error}`);
+        return accountCache.value;
+      }
+      throw error;
+    } finally {
+      accountInfoInFlight = null;
+    }
+  })();
+  return accountInfoInFlight;
 }
 
 async function getThreads({ preserveIds = [] } = {}) {
+  const preserveKey = [...new Set(preserveIds.map((id) => String(id || "").trim()).filter(Boolean))].sort().join(",");
+  const now = Date.now();
+  if (threadsCache?.key === preserveKey && now - threadsCache.cachedAt < THREADS_CACHE_MS) return threadsCache.value;
+  if (threadsInFlight?.key === preserveKey) return threadsInFlight.promise;
+
+  const promise = loadThreadsUncached({ preserveIds, preserveKey });
+  threadsInFlight = { key: preserveKey, promise };
+  try {
+    return await promise;
+  } finally {
+    if (threadsInFlight?.promise === promise) threadsInFlight = null;
+  }
+}
+
+async function loadThreadsUncached({ preserveIds = [], preserveKey = "" } = {}) {
   const { stateDb, sessionIndex } = codexPaths((await refreshCodexHomeContext()).home);
   const appendRecentIpcRows = (rows, excludedIds = new Set()) => {
     const seen = new Set(rows.map((row) => String(row.id || "")));
@@ -1627,45 +1697,54 @@ async function getThreads({ preserveIds = [] } = {}) {
       return updatedB - updatedA;
     });
   };
-  if (existsSync(stateDb)) {
-    const sessionIndexTitles = await readSessionIndexTitleMap();
-    const rows = await runSqlJson(`
-      SELECT id, title, rollout_path AS rolloutPath, created_at_ms AS createdAtMs,
-             updated_at_ms AS updatedAtMs, archived, preview, cwd, model
-      FROM threads
-      ORDER BY updated_at_ms DESC, updated_at DESC
-      LIMIT 500;
-    `);
-    const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
-    const archivedIds = new Set(rows.filter(isArchivedThread).map((row) => String(row.id || "")));
-    const stateRows = filtered.rows.filter((row) => !isArchivedThread(row)).map((row) => ({
-      id: row.id,
-      title: displayThreadTitle(row, sessionIndexTitles),
-      rolloutPath: row.rolloutPath,
-      createdAtMs: row.createdAtMs,
-      updatedAtMs: row.updatedAtMs,
-      archived: Boolean(row.archived),
-      preview: row.preview || "",
-      cwd: row.cwd || "",
-      model: row.model || ""
-    }));
-    const seen = new Set(stateRows.map((row) => String(row.id || "")));
-    const indexFiltered = await filterRowsForCurrentAccount(await readSessionIndexRows(), (row) => row.id, preserveIds);
-    const indexRows = indexFiltered.rows.filter((row) => !seen.has(String(row.id || "")) && !archivedIds.has(String(row.id || "")));
-    return appendRecentIpcRows([...stateRows, ...indexRows], archivedIds);
+  try {
+    let value;
+    if (existsSync(stateDb)) {
+      const sessionIndexTitles = await readSessionIndexTitleMap();
+      const rows = await runSqlJson(`
+        SELECT id, title, rollout_path AS rolloutPath, created_at_ms AS createdAtMs,
+               updated_at_ms AS updatedAtMs, archived, preview, cwd, model
+        FROM threads
+        ORDER BY updated_at_ms DESC, updated_at DESC
+        LIMIT 500;
+      `);
+      const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
+      const archivedIds = new Set(rows.filter(isArchivedThread).map((row) => String(row.id || "")));
+      const stateRows = filtered.rows.filter((row) => !isArchivedThread(row)).map((row) => ({
+        id: row.id,
+        title: displayThreadTitle(row, sessionIndexTitles),
+        rolloutPath: row.rolloutPath,
+        createdAtMs: row.createdAtMs,
+        updatedAtMs: row.updatedAtMs,
+        archived: Boolean(row.archived),
+        preview: row.preview || "",
+        cwd: row.cwd || "",
+        model: row.model || ""
+      }));
+      const seen = new Set(stateRows.map((row) => String(row.id || "")));
+      const indexFiltered = await filterRowsForCurrentAccount(await readSessionIndexRows(), (row) => row.id, preserveIds);
+      const indexRows = indexFiltered.rows.filter((row) => !seen.has(String(row.id || "")) && !archivedIds.has(String(row.id || "")));
+      value = appendRecentIpcRows([...stateRows, ...indexRows], archivedIds);
+    } else {
+      const rows = await readSessionIndexRows();
+      const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
+      value = appendRecentIpcRows(filtered.rows);
+    }
+    threadsCache = { key: preserveKey, cachedAt: Date.now(), value };
+    return value;
+  } catch (error) {
+    if (threadsCache?.key === preserveKey && Date.now() - threadsCache.cachedAt < THREADS_STALE_CACHE_MS) {
+      logError(`[cache:stale] GET /api/threads using cached threads after refresh failed: ${error?.message || error}`);
+      return threadsCache.value;
+    }
+    throw error;
   }
-
-  const rows = await readSessionIndexRows();
-  const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
-  return appendRecentIpcRows(filtered.rows);
 }
 
 async function findThread(id) {
-  const filtered = await filterRowsForCurrentAccount([{ id }], (row) => row.id, [id]);
   const recentIpcThread =
     (codexIpcClient?.getDesktopConversationRows?.() || codexIpcClient?.getRecentConversationRows?.() || []).find((row) => row.id === String(id)) ||
     null;
-  if (filtered.accountFiltered && !filtered.rows.length && !recentIpcThread) return null;
   const sessionIndexTitles = await readSessionIndexTitleMap();
   const rows = await runSqlJson(`
     SELECT id, title, rollout_path AS rolloutPath, updated_at_ms AS updatedAtMs
@@ -2847,6 +2926,22 @@ async function sendToCodex(text, threadId, images = [], { newThread = false } = 
         });
         throw err;
       }
+    } else if (isIpcTimeoutError(error)) {
+      try {
+        await sleep(750);
+        result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
+      } catch (retryError) {
+        const retryMessage = retryError?.message || noticeMessage;
+        const err = new Error(`Codex Desktop did not respond to the send request in time. Check that the target conversation is open and try again. Last IPC error: ${retryMessage}`);
+        err.status = 503;
+        recordNotice(targetThreadId, {
+          severity: "error",
+          title: "Send timed out",
+          content: err.message,
+          source: "send"
+        });
+        throw err;
+      }
     } else {
       recordNotice(targetThreadId, {
         severity: noticeSeverity(error?.ipcMessage || { type: "error", message: noticeMessage }, "error"),
@@ -3009,6 +3104,10 @@ async function openCodexUrl(url) {
 function isNoOpenOwnerError(error) {
   const message = String(error?.message || "");
   return message === "no-client-found" || message.includes("thread-role-timeout");
+}
+
+function isIpcTimeoutError(error) {
+  return /timed out/i.test(String(error?.message || ""));
 }
 
 async function interruptCodex(threadId) {

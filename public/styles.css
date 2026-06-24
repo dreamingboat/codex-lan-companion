@@ -1205,6 +1205,7 @@ h2 {
 }
 
 .composer-buttons {
+  position: relative;
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -1219,6 +1220,42 @@ h2 {
 .attach-button:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.image-picker-menu {
+  position: absolute;
+  right: 48px;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  display: grid;
+  min-width: 116px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.14);
+  padding: 4px;
+}
+
+.image-picker-menu[hidden] {
+  display: none;
+}
+
+.image-picker-menu button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.image-picker-menu button:hover {
+  background: #f3f6f4;
 }
 
 .account-widget {

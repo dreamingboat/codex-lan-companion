@@ -90,7 +90,19 @@
           ></textarea>
           <div id="pluginMentionMenu" class="plugin-mention-menu" role="listbox" hidden></div>
           <div id="skillMentionMenu" class="plugin-mention-menu skill-mention-menu" role="listbox" hidden></div>
-          <input id="imageInput" type="file" accept="image/*" multiple hidden />
+          <input
+            id="imageInput"
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+          />
+          <input
+            id="imageFileInput"
+            type="file"
+            multiple
+            hidden
+          />
           <div id="attachmentTray" class="attachment-tray" hidden></div>
           <div class="composer-actions">
             <div class="composer-left">
@@ -137,6 +149,10 @@
             </div>
             <div class="composer-buttons">
               <button id="attachButton" class="icon-button attach-button" type="button" title="添加图片" aria-label="添加图片">+</button>
+              <div id="imagePickerMenu" class="image-picker-menu" role="menu" hidden>
+                <button id="pickPhotoButton" type="button" role="menuitem">相册</button>
+                <button id="pickFileButton" type="button" role="menuitem">文件浏览</button>
+              </div>
               <button id="sendButton" class="send-button" type="submit" title="发送" aria-label="发送">
                 <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 19V5"></path>
