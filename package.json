@@ -11,6 +11,7 @@
   },
   "files": [
     "server.js",
+    "lib",
     "scripts",
     "public",
     "docs/assets",

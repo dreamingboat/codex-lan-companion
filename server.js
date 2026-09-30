@@ -9,6 +9,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import qrcode from "qrcode-terminal";
+import { readDesktopIpcVersions, desktopRequestEnvelope, desktopStartTurnParams } from "./lib/desktop-ipc-protocol.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -185,13 +186,17 @@ const PORT = Number(cli.port || process.env.PORT || 8787);
 let AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
 const ACCESS_TOKEN = cli.password || cli.token || process.env.CODEX_LAN_PASSWORD || process.env.CODEX_LAN_TOKEN || String(randomInt(100000, 1000000));
 const ALLOW_WRITE = !cli.readonly && process.env.CODEX_LAN_READONLY !== "1";
-const CODEX_IPC_SOCKET =
-  cli.ipcSocket ||
-  process.env.CODEX_IPC_SOCKET ||
-  (process.platform === "win32"
+const LEGACY_CODEX_IPC_SOCKET =
+  process.platform === "win32"
     ? String.raw`\\.\pipe\codex-ipc`
-    : path.join(os.tmpdir(), "codex-ipc", typeof process.getuid === "function" ? `ipc-${process.getuid()}.sock` : "ipc.sock"));
-const CODEX_CLI = process.env.CODEX_CLI || (existsSync("/Applications/Codex.app/Contents/Resources/codex") ? "/Applications/Codex.app/Contents/Resources/codex" : "codex");
+    : path.join(os.tmpdir(), "codex-ipc", typeof process.getuid === "function" ? `ipc-${process.getuid()}.sock` : "ipc.sock");
+const CODEX_HOME_IPC_SOCKET = process.platform === "win32" ? LEGACY_CODEX_IPC_SOCKET : path.join(INITIAL_CODEX_HOME, "ipc", "ipc.sock");
+const CODEX_IPC_SOCKET = cli.ipcSocket || process.env.CODEX_IPC_SOCKET || (existsSync(CODEX_HOME_IPC_SOCKET) ? CODEX_HOME_IPC_SOCKET : LEGACY_CODEX_IPC_SOCKET);
+const CODEX_CLI_CANDIDATES = [
+  "/Applications/Codex.app/Contents/Resources/codex",
+  "/Applications/ChatGPT.app/Contents/Resources/codex"
+];
+const CODEX_CLI = process.env.CODEX_CLI || CODEX_CLI_CANDIDATES.find((candidate) => existsSync(candidate)) || "codex";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const GENERATED_IMAGES_DIR = path.join(os.homedir(), ".codex", "generated_images");
 const MAX_SEND_IMAGES = 4;
@@ -216,6 +221,11 @@ const IPC_VERSION_BY_METHOD = {
   "thread-follower-file-approval-decision": 1,
   "thread-follower-permissions-request-approval-response": 1
 };
+const CODEX_APP_ARCHIVE_CANDIDATES = [
+  ...(path.isAbsolute(CODEX_CLI) ? [path.join(path.dirname(CODEX_CLI), "app.asar")] : []),
+  "/Applications/ChatGPT.app/Contents/Resources/app.asar",
+  "/Applications/Codex.app/Contents/Resources/app.asar"
+];
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -771,13 +781,15 @@ class DesktopCodexIpcClient {
     this.clientId = null;
     this.events = [];
     this.desktopConversationRows = new Map();
+    this.protocol = { versions: IPC_VERSION_BY_METHOD, detected: false, source: null };
   }
 
   async ensureReady() {
-    if (this.socket?.writable && this.ready) {
-      return this.ready;
-    }
-    this.ready = this.connect();
+    if (this.ready) return this.ready;
+    this.ready = this.connect().catch((error) => {
+      this.close();
+      throw error;
+    });
     return this.ready;
   }
 
@@ -788,6 +800,16 @@ class DesktopCodexIpcClient {
     this.buffer = Buffer.alloc(0);
     this.pending.clear();
     this.clientId = null;
+    for (const archivePath of CODEX_APP_ARCHIVE_CANDIDATES) {
+      try {
+        const versions = await readDesktopIpcVersions(archivePath);
+        if (!versions) continue;
+        this.protocol = { versions, detected: true, source: archivePath };
+        break;
+      } catch {
+        // Use the legacy protocol when an installed bundle cannot be inspected.
+      }
+    }
 
     await new Promise((resolve, reject) => {
       const socket = net.createConnection(CODEX_IPC_SOCKET);
@@ -944,6 +966,7 @@ class DesktopCodexIpcClient {
       preview: existing.preview || "",
       cwd: existing.cwd || "",
       model: existing.model || "",
+      threadSource: message?.params?.conversationState?.threadSource ?? message?.params?.conversationState?.source ?? existing.threadSource,
       source: "desktop-ipc"
     });
     if (this.desktopConversationRows.size > 80) {
@@ -972,6 +995,38 @@ class DesktopCodexIpcClient {
         "",
       summary: compact(redactLargePayloads(event.message), 3000)
     }));
+  }
+
+  statusSummary() {
+    const followingByHost = new Map();
+    const startTurns = [];
+    for (const event of this.events) {
+      const message = event.message || {};
+      if (message.method === "thread-stream-following-changed") {
+        const hostId = message.params?.hostId || "local";
+        const conversationId = message.params?.conversationId || "";
+        if (message.params?.following === true && conversationId) followingByHost.set(hostId, conversationId);
+        else if (message.params?.following === false && followingByHost.get(hostId) === conversationId) followingByHost.delete(hostId);
+      }
+      if (message.method === "thread-follower-start-turn") {
+        startTurns.push({
+          timestamp: event.timestamp,
+          direction: message.direction || "",
+          resultType: message.resultType || "",
+          error: message.error || null,
+          conversationId: this.conversationIdFromMessage(message) || "",
+          handledByClientId: message.handledByClientId || null,
+          turnId: firstString(message.result?.result?.turn?.id, message.result?.turn?.id, message.result?.turnId)
+        });
+      }
+    }
+    return {
+      connected: Boolean(this.socket?.writable),
+      clientId: this.clientId || null,
+      protocol: { source: this.protocol.source, startTurnVersion: this.protocol.versions["thread-follower-start-turn"] },
+      following: Object.fromEntries(followingByHost.entries()),
+      lastStartTurns: startTurns.slice(-8)
+    };
   }
 
   getRecentConversationIds(maxAgeMs = 15 * 60 * 1000) {
@@ -1132,11 +1187,10 @@ class DesktopCodexIpcClient {
         method,
         params
       };
-      if (params?.hostId) {
-        message.hostId = params.hostId;
-      }
+      const envelope = desktopRequestEnvelope(this.protocol, method, params);
+      if (envelope.hostId) message.hostId = envelope.hostId;
       if (includeVersion) {
-        message.version = IPC_VERSION_BY_METHOD[method] ?? 0;
+        message.version = envelope.version;
       }
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
@@ -1170,14 +1224,12 @@ class DesktopCodexIpcClient {
         url: `data:${image.mimeType};base64,${image.data}`
       });
     }
-    return this.request("thread-follower-start-turn", {
-      conversationId: threadId,
-      hostId: "local",
-      turnStartParams: {
-        input,
-        attachments: []
-      }
-    });
+    return this.request("thread-follower-start-turn", desktopStartTurnParams(this.protocol, threadId, input, randomUUID()));
+  }
+
+  async findThreadOwner(threadId) {
+    await this.ensureReady();
+    return this.request("thread-owner-discovery", { hostId: "local", conversationId: threadId });
   }
 
   async interruptTurn(threadId) {
@@ -1610,6 +1662,7 @@ async function readSessionIndexRows() {
         preview: "",
         cwd: "",
         model: "",
+        threadSource: row.thread_source ?? row.source,
         source: "session-index"
       });
     } catch {
@@ -1626,6 +1679,19 @@ function displayThreadTitle(row, sessionIndexTitles) {
 
 function isArchivedThread(row) {
   return row?.archived === true || Number(row?.archived) === 1;
+}
+
+function isGuardianThread(row) {
+  let source = row?.threadSource ?? row?.source;
+  if (source === "guardian_review") return true;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      return false;
+    }
+  }
+  return source?.subagent?.other === "guardian";
 }
 
 async function getAccountInfo() {
@@ -1681,6 +1747,9 @@ async function getThreads({ preserveIds = [] } = {}) {
 }
 
 async function loadThreadsUncached({ preserveIds = [], preserveKey = "" } = {}) {
+  const loadStartedAt = Date.now();
+  const timings = [];
+  const markTiming = (label, startedAt) => timings.push(`${label}=${Date.now() - startedAt}ms`);
   const { stateDb, sessionIndex } = codexPaths((await refreshCodexHomeContext()).home);
   const appendRecentIpcRows = (rows, excludedIds = new Set()) => {
     const seen = new Set(rows.map((row) => String(row.id || "")));
@@ -1689,7 +1758,7 @@ async function loadThreadsUncached({ preserveIds = [], preserveKey = "" } = {}) 
       ...rows,
       ...recentRows.filter((row) => {
         const id = String(row.id || "");
-        return !isArchivedThread(row) && !excludedIds.has(id) && !seen.has(id) && row.rolloutPath;
+        return !isArchivedThread(row) && !isGuardianThread(row) && !excludedIds.has(id) && !seen.has(id) && row.rolloutPath;
       })
     ].sort((a, b) => {
       const updatedA = Number(a.updatedAtMs) || 0;
@@ -1700,17 +1769,33 @@ async function loadThreadsUncached({ preserveIds = [], preserveKey = "" } = {}) 
   try {
     let value;
     if (existsSync(stateDb)) {
+      let stageStartedAt = Date.now();
       const sessionIndexTitles = await readSessionIndexTitleMap();
+      markTiming("sessionIndexTitles", stageStartedAt);
+      stageStartedAt = Date.now();
       const rows = await runSqlJson(`
         SELECT id, title, rollout_path AS rolloutPath, created_at_ms AS createdAtMs,
-               updated_at_ms AS updatedAtMs, archived, preview, cwd, model
+               updated_at_ms AS updatedAtMs, archived, preview, cwd, model, source AS threadSource
         FROM threads
         ORDER BY updated_at_ms DESC, updated_at DESC
         LIMIT 500;
       `);
+      // Include older internal threads so the index and IPC cannot re-add them.
+      const guardianRows = await runSqlJson(`
+        SELECT id FROM threads
+        WHERE CASE WHEN json_valid(source)
+          THEN json_extract(source, '$.subagent.other') = 'guardian'
+          ELSE 0 END;
+      `);
+      markTiming("stateDb", stageStartedAt);
+      stageStartedAt = Date.now();
       const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
-      const archivedIds = new Set(rows.filter(isArchivedThread).map((row) => String(row.id || "")));
-      const stateRows = filtered.rows.filter((row) => !isArchivedThread(row)).map((row) => ({
+      markTiming("accountFilterState", stageStartedAt);
+      const excludedIds = new Set([
+        ...rows.filter((row) => isArchivedThread(row) || isGuardianThread(row)).map((row) => String(row.id || "")),
+        ...guardianRows.map((row) => String(row.id || ""))
+      ]);
+      const stateRows = filtered.rows.filter((row) => !isArchivedThread(row) && !isGuardianThread(row)).map((row) => ({
         id: row.id,
         title: displayThreadTitle(row, sessionIndexTitles),
         rolloutPath: row.rolloutPath,
@@ -1722,13 +1807,30 @@ async function loadThreadsUncached({ preserveIds = [], preserveKey = "" } = {}) 
         model: row.model || ""
       }));
       const seen = new Set(stateRows.map((row) => String(row.id || "")));
-      const indexFiltered = await filterRowsForCurrentAccount(await readSessionIndexRows(), (row) => row.id, preserveIds);
-      const indexRows = indexFiltered.rows.filter((row) => !seen.has(String(row.id || "")) && !archivedIds.has(String(row.id || "")));
-      value = appendRecentIpcRows([...stateRows, ...indexRows], archivedIds);
+      stageStartedAt = Date.now();
+      const sessionRows = await readSessionIndexRows();
+      markTiming("sessionIndexRows", stageStartedAt);
+      stageStartedAt = Date.now();
+      const indexFiltered = await filterRowsForCurrentAccount(sessionRows, (row) => row.id, preserveIds);
+      markTiming("accountFilterIndex", stageStartedAt);
+      const indexRows = indexFiltered.rows.filter((row) => !isGuardianThread(row) && !seen.has(String(row.id || "")) && !excludedIds.has(String(row.id || "")));
+      stageStartedAt = Date.now();
+      value = appendRecentIpcRows([...stateRows, ...indexRows], excludedIds);
+      markTiming("appendIpc", stageStartedAt);
     } else {
+      let stageStartedAt = Date.now();
       const rows = await readSessionIndexRows();
+      markTiming("sessionIndexRows", stageStartedAt);
+      stageStartedAt = Date.now();
       const filtered = await filterRowsForCurrentAccount(rows, (row) => row.id, preserveIds);
-      value = appendRecentIpcRows(filtered.rows);
+      markTiming("accountFilterIndex", stageStartedAt);
+      stageStartedAt = Date.now();
+      value = appendRecentIpcRows(filtered.rows.filter((row) => !isGuardianThread(row)));
+      markTiming("appendIpc", stageStartedAt);
+    }
+    const elapsedMs = Date.now() - loadStartedAt;
+    if (elapsedMs > SLOW_POLL_REQUEST_MS) {
+      logInfo(`[threads:slow] loadThreadsUncached ${elapsedMs}ms rows=${value.length} ${timings.join(" ")}`);
     }
     threadsCache = { key: preserveKey, cachedAt: Date.now(), value };
     return value;
@@ -3468,6 +3570,25 @@ const server = http.createServer(async (req, res) => {
         clientId: codexIpcClient?.clientId || null,
         eventCount: codexIpcClient?.events?.length || 0,
         events: codexIpcClient?.rawEvents(url.searchParams.get("limit")) || []
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/debug/status") {
+      if (!requireAuthorized(req, res, url)) return;
+      keepIpcWarm();
+      const homeState = await refreshCodexHomeContext({ force: true, source: "debug-status" });
+      sendJson(res, 200, {
+        ok: true,
+        codexHome: homeState.home,
+        codexHomeVersion: homeState.version,
+        codexHomeSource: homeState.source,
+        ipc: codexIpcClient?.statusSummary() || {
+          connected: false,
+          clientId: null,
+          following: {},
+          lastStartTurns: []
+        },
+        now: new Date().toISOString()
       });
       return;
     }
