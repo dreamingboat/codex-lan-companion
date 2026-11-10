@@ -143,6 +143,7 @@ const I18N = {
     desktopMayNeedAttention: "可能需要桌面处理",
     showUsage: "显示套餐用量",
     send: "发送",
+    steer: "引导",
     stop: "停止",
     stopCurrentTask: "停止当前任务",
     addImage: "添加图片",
@@ -184,8 +185,9 @@ const I18N = {
     minuteWindow: "{count} 分钟窗口",
     resetAt: "重置 {time}",
     sendFailed: "发送失败：{message}",
+    steerFailed: "引导发送失败：{message}",
     interruptFailed: "停止失败：{message}",
-    busyCannotSend: "Codex 正在处理。请先停止当前任务，再发送这条消息。",
+    busyCannotSend: "任务进行中暂不支持图片引导，请移除图片后发送文字。",
     pluginPickerTitle: "引用插件",
     pluginPickerLoading: "正在加载插件...",
     pluginPickerEmpty: "没有找到匹配插件",
@@ -236,6 +238,7 @@ const I18N = {
     desktopMayNeedAttention: "Desktop may need attention",
     showUsage: "Show plan usage",
     send: "Send",
+    steer: "Steer",
     stop: "Stop",
     stopCurrentTask: "Stop current task",
     addImage: "Add image",
@@ -277,8 +280,9 @@ const I18N = {
     minuteWindow: "{count} minute window",
     resetAt: "resets {time}",
     sendFailed: "Send failed: {message}",
+    steerFailed: "Steer failed: {message}",
     interruptFailed: "Stop failed: {message}",
-    busyCannotSend: "Codex is still processing. Stop the current task before sending this message.",
+    busyCannotSend: "Image steering is not supported during an active task. Remove images to send text.",
     pluginPickerTitle: "Mention plugin",
     pluginPickerLoading: "Loading plugins...",
     pluginPickerEmpty: "No matching plugins",
@@ -1175,6 +1179,9 @@ async function fetchJson(url) {
   if (!response.ok) {
     const error = new Error(data.error || response.statusText);
     error.status = response.status;
+    error.code = data.code || "";
+    error.threadId = data.threadId || "";
+    error.refreshThreads = Boolean(data.refreshThreads);
     handleUnauthorized(error);
     throw error;
   }
@@ -1251,6 +1258,9 @@ async function postJson(url, body) {
   if (!response.ok) {
     const error = new Error(data.error || response.statusText);
     error.status = response.status;
+    error.code = data.code || "";
+    error.threadId = data.threadId || "";
+    error.refreshThreads = Boolean(data.refreshThreads);
     handleUnauthorized(error);
     throw error;
   }
@@ -1614,15 +1624,18 @@ function renderComposerMode() {
   const allowWrite = Boolean(state.config?.allowWrite);
   const thinking = Boolean(state.threadStatus?.thinking);
   const hasTarget = Boolean(state.selectedId);
-  const canSend = allowWrite && hasTarget && (thinking || (!state.composerBusy && hasComposerPayload()));
+  const hasPayload = hasComposerPayload();
+  const steering = thinking && hasPayload;
+  const canSend = allowWrite && hasTarget && !state.composerBusy && (thinking || hasPayload);
   els.composerInput.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.attachButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.pluginPickerButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.skillPickerButton.disabled = !allowWrite || state.composerBusy || !hasTarget;
   els.sendButton.disabled = !canSend;
-  els.sendButton.classList.toggle("stop-mode", allowWrite && thinking);
-  els.sendButton.setAttribute("aria-label", allowWrite && thinking ? t("stopCurrentTask") : t("send"));
-  els.sendButton.setAttribute("title", allowWrite && thinking ? t("stopCurrentTask") : t("send"));
+  els.sendButton.classList.toggle("stop-mode", allowWrite && thinking && !steering);
+  const actionLabel = allowWrite && thinking ? (steering ? t("steer") : t("stopCurrentTask")) : t("send");
+  els.sendButton.setAttribute("aria-label", actionLabel);
+  els.sendButton.setAttribute("title", actionLabel);
   els.composerInput.placeholder = allowWrite ? (state.selectedId === DRAFT_THREAD_ID ? t("newConversationReady") : t("sendToCodex")) : t("readonlyPlaceholder");
   if (!allowWrite) els.sendStatus.textContent = t("readonly");
   else if (els.sendStatus.textContent === t("readonly")) els.sendStatus.textContent = "";
@@ -2204,13 +2217,13 @@ els.composerForm.addEventListener("submit", async (event) => {
   closePluginMentionMenu();
   if (!state.config?.allowWrite) return;
   const thinking = Boolean(state.threadStatus?.thinking);
-  if (state.composerBusy && !thinking) return;
+  if (state.composerBusy) return;
   const isDraftThread = state.selectedId === DRAFT_THREAD_ID;
   const message = els.composerInput.value.trim();
   const sendMessage = composerSendMessage(message);
   const images = [...state.imageAttachments];
   if (!thinking && !sendMessage && !images.length) return;
-  if (thinking && (sendMessage || images.length)) {
+  if (thinking && images.length) {
     els.sendStatus.textContent = t("busyCannotSend");
     return;
   }
@@ -2226,8 +2239,21 @@ els.composerForm.addEventListener("submit", async (event) => {
   els.sendStatus.textContent = "";
   try {
     if (thinking) {
-      await postJson("/api/interrupt", { threadId: state.selectedId });
-      state.threadStatus = { ...(state.threadStatus || {}), thinking: false };
+      if (sendMessage) {
+        const result = await postJson("/api/steer", {
+          message: sendMessage,
+          threadId: state.selectedId,
+          turnId: state.threadStatus?.turnId || null
+        });
+        els.composerInput.value = "";
+        autoResizeComposerInput();
+        clearSelectedPlugins();
+        clearSelectedSkills();
+        state.threadStatus = { ...(state.threadStatus || {}), turnId: result.turnId || state.threadStatus?.turnId || null };
+      } else {
+        await postJson("/api/interrupt", { threadId: state.selectedId });
+        state.threadStatus = { ...(state.threadStatus || {}), thinking: false };
+      }
       state.messagesSignature = "";
       renderComposerMode();
       refreshSoon();
@@ -2267,7 +2293,10 @@ els.composerForm.addEventListener("submit", async (event) => {
       els.imageFileInput.value = "";
       renderImageAttachments();
     }
-    els.sendStatus.textContent = t(thinking ? "interruptFailed" : "sendFailed", { message: error.message });
+    if (error.refreshThreads) {
+      loadThreads().catch(() => {});
+    }
+    els.sendStatus.textContent = t(thinking && sendMessage ? "steerFailed" : thinking ? "interruptFailed" : "sendFailed", { message: error.message });
   } finally {
     state.composerBusy = false;
     renderComposerMode();

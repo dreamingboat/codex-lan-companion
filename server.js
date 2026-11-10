@@ -207,6 +207,10 @@ const DEFAULT_MESSAGE_LIMIT = 80;
 const MAX_MESSAGE_LIMIT = 1000;
 const TAIL_ROLLOUT_MIN_BYTES = 512 * 1024;
 const TAIL_ROLLOUT_MAX_BYTES = 4 * 1024 * 1024;
+const TAIL_ROLLOUT_FALLBACK_MAX_BYTES = 64 * 1024 * 1024;
+const TAIL_ROLLOUT_MIN_VISIBLE_MESSAGES = 12;
+const RATE_LIMIT_ROLLOUT_CHUNK_BYTES = 4 * 1024 * 1024;
+const RATE_LIMIT_ROLLOUT_MAX_SCAN_BYTES = 64 * 1024 * 1024;
 const MIN_SEND_IMAGE_BYTES = 512;
 const MIN_SEND_IMAGE_EDGE = 16;
 const MAX_SEND_IMAGE_EDGE = 4096;
@@ -214,6 +218,16 @@ const MAX_SEND_IMAGE_PIXELS = 12_000_000;
 const SUPPORTED_SEND_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const ACTIVE_TURN_STALE_MS = 10 * 60 * 1000;
 const ACTIVE_STATUS_CACHE_MS = 5000;
+const DESKTOP_OWNER_SEND_RETRY_MS = 35_000;
+const DESKTOP_FOLLOW_WAIT_MS = 12_000;
+const DESKTOP_OWNER_SETTLE_MS = 2500;
+const DESKTOP_THREAD_NOT_FOUND_CACHE_MS = 5 * 60 * 1000;
+const DESKTOP_OWNER_UNAVAILABLE_CACHE_MS = 2 * 60 * 1000;
+const APP_SERVER_TURN_START_TIMEOUT_MS = 45000;
+const APP_SERVER_TURN_KEEPALIVE_MS = 5 * 60 * 1000;
+const APP_SERVER_MODEL = process.env.CODEX_MODEL || "gpt-5.5";
+const APP_SERVER_MODEL_PROVIDER = process.env.CODEX_MODEL_PROVIDER || "openai";
+const ALLOW_APP_SERVER_SEND_FALLBACK = process.env.CODEX_LAN_ALLOW_APP_SERVER_SEND_FALLBACK === "1";
 const IPC_VERSION_BY_METHOD = {
   "thread-follower-start-turn": 1,
   "thread-follower-interrupt-turn": 1,
@@ -234,6 +248,8 @@ const jsonHeaders = {
 
 const messageCache = new Map();
 const recentNotices = [];
+const desktopThreadNotFoundCache = new Map();
+const desktopOwnerUnavailableCache = new Map();
 let codexIpcClient = null;
 let accountCache = null;
 let threadAccountCache = null;
@@ -547,6 +563,8 @@ function clearHomeScopedCaches() {
   threadsCache = null;
   threadsInFlight = null;
   messageCache.clear();
+  desktopThreadNotFoundCache.clear();
+  desktopOwnerUnavailableCache.clear();
   recentNotices.splice(0, recentNotices.length);
   codexIpcClient?.clearHomeScopedState?.();
 }
@@ -1098,10 +1116,33 @@ class DesktopCodexIpcClient {
     });
   }
 
+  hasFollowingEvent(threadId, sinceMs = 0) {
+    const selectedThreadId = String(threadId || "");
+    if (!selectedThreadId) return false;
+    return this.events.some((event) => {
+      if (sinceMs && Date.parse(event.timestamp) < sinceMs) return false;
+      const message = event.message || {};
+      return (
+        message.method === "thread-stream-following-changed" &&
+        String(message.params?.conversationId || "") === selectedThreadId &&
+        message.params?.following === true
+      );
+    });
+  }
+
   async waitForConversationEvent(threadId, { sinceMs = 0, timeoutMs = 5000 } = {}) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       if (this.hasConversationEvent(threadId, sinceMs)) return true;
+      await sleep(150);
+    }
+    return false;
+  }
+
+  async waitForFollowingEvent(threadId, { sinceMs = 0, timeoutMs = 5000 } = {}) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (this.hasFollowingEvent(threadId, sinceMs)) return true;
       await sleep(150);
     }
     return false;
@@ -1237,6 +1278,20 @@ class DesktopCodexIpcClient {
     return this.request("thread-follower-interrupt-turn", {
       conversationId: threadId
     });
+  }
+
+  async steerTurn(threadId, expectedTurnId, text) {
+    await this.ensureReady();
+    return this.request(
+      "thread-follower-steer-turn",
+      {
+        conversationId: threadId,
+        expectedTurnId,
+        input: [{ type: "text", text, text_elements: [] }],
+        clientUserMessageId: randomUUID()
+      },
+      { timeoutMs: 12000 }
+    );
   }
 
   async refreshRecentConversations(hostId = "local") {
@@ -1549,22 +1604,49 @@ async function readLatestRateLimits() {
   const rolloutPaths = await latestRolloutPaths();
   for (const rolloutPath of rolloutPaths) {
     if (!existsSync(rolloutPath)) continue;
-    const content = await fs.readFile(rolloutPath, "utf8");
-    const lines = content.split(/\r?\n/);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const line = lines[index]?.trim();
-      if (!line) continue;
-      try {
-        const entry = JSON.parse(line);
-        const rateLimits = entry.type === "event_msg" && entry.payload?.type === "token_count" ? entry.payload.rate_limits : null;
-        if (rateLimits) {
-          const normalized = normalizeRateLimits(rateLimits, entry.timestamp);
-          if (normalized) return normalized;
-        }
-      } catch {
-        // Skip malformed historical lines.
+    const rateLimits = await readLatestRateLimitsFromRollout(rolloutPath);
+    if (rateLimits) return rateLimits;
+  }
+  return null;
+}
+
+function rateLimitsFromRolloutLine(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed) return null;
+  try {
+    const entry = JSON.parse(trimmed);
+    const rateLimits = entry.type === "event_msg" && entry.payload?.type === "token_count" ? entry.payload.rate_limits : null;
+    return rateLimits ? normalizeRateLimits(rateLimits, entry.timestamp) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readLatestRateLimitsFromRollout(rolloutPath) {
+  const stat = await fs.stat(rolloutPath);
+  if (!stat.size) return null;
+  const handle = await fs.open(rolloutPath, "r");
+  try {
+    let offset = stat.size;
+    let scannedBytes = 0;
+    let leadingPartial = "";
+    while (offset > 0 && scannedBytes < RATE_LIMIT_ROLLOUT_MAX_SCAN_BYTES) {
+      const bytesToRead = Math.min(RATE_LIMIT_ROLLOUT_CHUNK_BYTES, offset, RATE_LIMIT_ROLLOUT_MAX_SCAN_BYTES - scannedBytes);
+      offset -= bytesToRead;
+      scannedBytes += bytesToRead;
+      const buffer = Buffer.alloc(bytesToRead);
+      const { bytesRead } = await handle.read(buffer, 0, bytesToRead, offset);
+      if (!bytesRead) break;
+      const text = buffer.subarray(0, bytesRead).toString("utf8") + leadingPartial;
+      const lines = text.split(/\r?\n/);
+      leadingPartial = offset > 0 ? lines.shift() || "" : "";
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const normalized = rateLimitsFromRolloutLine(lines[index]);
+        if (normalized) return normalized;
       }
     }
+  } finally {
+    await handle.close();
   }
   return null;
 }
@@ -2309,8 +2391,17 @@ function isImportantNoticeMessage(message) {
   return /\b(error|failed?|limit|quota|rate_limit|usage_limit|plan_limit)\b/.test(text);
 }
 
+function isAutomaticApprovalReviewMessage(message) {
+  if (!message) return false;
+  const kind = String(message.kind || "").toLowerCase();
+  if (kind === "automaticapprovalreview") return true;
+  if (message.role !== "interaction") return false;
+  return /"type"\s*:\s*"automaticApprovalReview"/.test(String(message.content || ""));
+}
+
 function shouldAlwaysReturnMessage(message, status = {}) {
   if (!message) return false;
+  if (isAutomaticApprovalReviewMessage(message)) return false;
   if (message.requiresDesktopAction) return true;
   if (message.role === "interaction") return Boolean(status.interactionRequired && message.source === "desktop-ipc" && message.canApprove);
   if (message.role === "notice") return isImportantNoticeMessage(message);
@@ -2319,9 +2410,15 @@ function shouldAlwaysReturnMessage(message, status = {}) {
 
 function isLowPriorityHiddenByDefaultMessage(message) {
   if (!message) return false;
+  if (isAutomaticApprovalReviewMessage(message)) return true;
   if (message.role === "tool") return true;
   if (message.role === "notice" && !isImportantNoticeMessage(message)) return true;
   return false;
+}
+
+function defaultVisibleMessageCount(messages) {
+  if (!Array.isArray(messages)) return 0;
+  return messages.filter((message) => !isLowPriorityHiddenByDefaultMessage(message)).length;
 }
 
 function clientMessageKey(message) {
@@ -2340,7 +2437,9 @@ function clientMessageKey(message) {
 
 function limitMessagesForClient(messages, status = {}, limit = DEFAULT_MESSAGE_LIMIT) {
   const normalizedLimit = normalizeMessageLimit(limit);
-  const sorted = Array.isArray(messages) ? messages.slice().sort(messageSortCompare) : [];
+  const sorted = Array.isArray(messages)
+    ? messages.filter((message) => !isAutomaticApprovalReviewMessage(message)).sort(messageSortCompare)
+    : [];
   const recentLowPriorityKeys = new Set(sorted.slice(-10).filter(isLowPriorityHiddenByDefaultMessage).map(clientMessageKey));
   const visiblePriorityMessages = sorted.filter((message) => !isLowPriorityHiddenByDefaultMessage(message) || recentLowPriorityKeys.has(clientMessageKey(message)));
   if (visiblePriorityMessages.length <= normalizedLimit) {
@@ -2679,9 +2778,7 @@ function rolloutResultFromState({ filePath, stat, nowMs, state, partial = false 
     const fileRecentlyUpdated = nowMs - Math.max(state.lastEntryAtMs || 0, stat.mtimeMs || 0) < ACTIVE_STATUS_CACHE_MS * 2;
     state.activeTurn = fileRecentlyUpdated ? recentOpenTurn : null;
   }
-  const activeTurnLastUpdatedAtMs = state.activeTurn
-    ? Math.max(state.activeTurn.startedAtMs || 0, state.lastEntryAtMs || 0, Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0)
-    : null;
+  const activeTurnLastUpdatedAtMs = state.activeTurn ? Math.max(state.activeTurn.startedAtMs || 0, state.lastEntryAtMs || 0) : null;
   const activeTurnStale = Boolean(state.activeTurn && nowMs - activeTurnLastUpdatedAtMs > ACTIVE_TURN_STALE_MS);
   const visibleActiveTurn = activeTurnStale ? null : state.activeTurn;
   for (const message of state.interactionMessages) {
@@ -2709,8 +2806,9 @@ function rolloutResultFromState({ filePath, stat, nowMs, state, partial = false 
   };
 }
 
-async function readRolloutTailLines(filePath, stat, limit) {
-  const bytes = Math.min(TAIL_ROLLOUT_MAX_BYTES, Math.max(TAIL_ROLLOUT_MIN_BYTES, normalizeMessageLimit(limit) * 24 * 1024));
+async function readRolloutTailLines(filePath, stat, limit, maxBytes = TAIL_ROLLOUT_MAX_BYTES) {
+  const baseBytes = Math.max(TAIL_ROLLOUT_MIN_BYTES, normalizeMessageLimit(limit) * 24 * 1024);
+  const bytes = Math.min(stat.size, maxBytes > TAIL_ROLLOUT_MAX_BYTES ? maxBytes : Math.min(maxBytes, baseBytes));
   const start = Math.max(0, stat.size - bytes);
   const handle = await fs.open(filePath, "r");
   try {
@@ -2727,11 +2825,14 @@ async function readRolloutTailLines(filePath, stat, limit) {
   }
 }
 
-async function parseRolloutTail(filePath, stat, limit, nowMs) {
+async function parseRolloutTail(filePath, stat, limit, nowMs, maxBytes = TAIL_ROLLOUT_MAX_BYTES) {
   const state = createRolloutParseState(stat, nowMs);
-  const lines = await readRolloutTailLines(filePath, stat, limit);
+  const lines = await readRolloutTailLines(filePath, stat, limit, maxBytes);
   for (const line of lines) parseRolloutLine(line, state);
-  return rolloutResultFromState({ filePath, stat, nowMs, state, partial: true });
+  return {
+    ...rolloutResultFromState({ filePath, stat, nowMs, state, partial: true }),
+    tailBytes: Math.min(maxBytes, stat.size)
+  };
 }
 
 async function parseRollout(filePath, { limit = DEFAULT_MESSAGE_LIMIT, preferTail = false } = {}) {
@@ -2743,7 +2844,16 @@ async function parseRollout(filePath, { limit = DEFAULT_MESSAGE_LIMIT, preferTai
   if (cached?.signature === signature && (!cached.result?.status?.thinking || cachedAgeMs < ACTIVE_STATUS_CACHE_MS)) return cached.result;
 
   if (preferTail && stat.size > TAIL_ROLLOUT_MAX_BYTES) {
-    const result = await parseRolloutTail(filePath, stat, limit, nowMs);
+    let maxBytes = TAIL_ROLLOUT_MAX_BYTES;
+    let result = await parseRolloutTail(filePath, stat, limit, nowMs, maxBytes);
+    while (
+      defaultVisibleMessageCount(result.messages) < TAIL_ROLLOUT_MIN_VISIBLE_MESSAGES &&
+      maxBytes < TAIL_ROLLOUT_FALLBACK_MAX_BYTES &&
+      maxBytes < stat.size
+    ) {
+      maxBytes = Math.min(maxBytes * 2, TAIL_ROLLOUT_FALLBACK_MAX_BYTES, stat.size);
+      result = await parseRolloutTail(filePath, stat, limit, nowMs, maxBytes);
+    }
     messageCache.set(filePath, { signature, result, cachedAtMs: nowMs });
     return result;
   }
@@ -2951,6 +3061,135 @@ function webpDimensions(bytes) {
   return null;
 }
 
+function shouldRetryDesktopOwnerStart(error) {
+  if (isThreadNotFoundError(error)) return false;
+  return isNoOpenOwnerError(error) || isIpcTimeoutError(error);
+}
+
+function codexDesktopThreadNotFoundError(threadId, error) {
+  const detail = error?.message ? ` Last IPC error: ${error.message}.` : "";
+  const err = new Error(`Codex Desktop could not find this conversation. Refresh the conversation list and open the conversation in Codex Desktop before sending again.${detail}`);
+  err.status = 409;
+  err.code = "desktop_thread_not_found";
+  err.threadId = threadId;
+  err.refreshThreads = true;
+  return err;
+}
+
+function rememberDesktopThreadNotFound(threadId, error) {
+  if (!threadId) return;
+  desktopThreadNotFoundCache.set(String(threadId), {
+    cachedAt: Date.now(),
+    message: error?.message || "thread not found"
+  });
+}
+
+function cachedDesktopThreadNotFoundError(threadId) {
+  const cached = desktopThreadNotFoundCache.get(String(threadId || ""));
+  if (!cached) return null;
+  if (Date.now() - cached.cachedAt > DESKTOP_THREAD_NOT_FOUND_CACHE_MS) {
+    desktopThreadNotFoundCache.delete(String(threadId || ""));
+    return null;
+  }
+  return codexDesktopThreadNotFoundError(threadId, new Error(cached.message));
+}
+
+function codexDesktopOwnerUnavailableError(threadId, error) {
+  const detail = error?.message ? ` Last IPC error: ${error.message}.` : "";
+  const err = new Error(`Codex Desktop did not take ownership of this conversation. Open the target conversation in Codex Desktop once, then send again.${detail}`);
+  err.status = 409;
+  err.code = "desktop_owner_unavailable";
+  err.threadId = threadId;
+  return err;
+}
+
+function rememberDesktopOwnerUnavailable(threadId, error) {
+  if (!threadId) return;
+  desktopOwnerUnavailableCache.set(String(threadId), {
+    cachedAt: Date.now(),
+    message: error?.message || "no-client-found"
+  });
+}
+
+function cachedDesktopOwnerUnavailableError(threadId) {
+  const cached = desktopOwnerUnavailableCache.get(String(threadId || ""));
+  if (!cached) return null;
+  if (Date.now() - cached.cachedAt > DESKTOP_OWNER_UNAVAILABLE_CACHE_MS) {
+    desktopOwnerUnavailableCache.delete(String(threadId || ""));
+    return null;
+  }
+  return codexDesktopOwnerUnavailableError(threadId, new Error(cached.message));
+}
+
+function desktopFollowUnavailableError(threadId, error) {
+  const err = new Error(error?.message || "no-client-found");
+  err.code = "desktop_follow_unavailable";
+  err.threadId = threadId;
+  err.cause = error;
+  return err;
+}
+
+async function prepareDesktopOwnerForThread(threadId, { sinceMs = Date.now(), openTarget = false } = {}) {
+  const client = getCodexIpcClient();
+  await client.ensureReady();
+  if (openTarget) {
+    try {
+      await openCodexUrl(`codex://threads/${encodeURIComponent(threadId)}`);
+    } catch {
+      // Opening the URL is best effort; Desktop may already be focused on the thread.
+    }
+  }
+  if (client.protocol.versions["thread-follower-start-turn"] >= 2) {
+    try {
+      const owner = await client.findThreadOwner(threadId);
+      return Boolean(owner.handledByClientId);
+    } catch (error) {
+      if (!isNoOpenOwnerError(error)) throw error;
+      return false;
+    }
+  }
+  let setActiveConversation = Promise.resolve();
+  try {
+    setActiveConversation = client.setActiveConversation(threadId, true).catch((error) => error);
+  } catch {
+    // Older Desktop builds may not support this method consistently.
+  }
+  const followed = await client.waitForFollowingEvent(threadId, { sinceMs, timeoutMs: DESKTOP_FOLLOW_WAIT_MS });
+  if (followed) {
+    await Promise.race([setActiveConversation, sleep(DESKTOP_OWNER_SETTLE_MS)]);
+    await sleep(DESKTOP_OWNER_SETTLE_MS);
+  }
+  return followed;
+}
+
+async function startTurnViaDesktopWithOwnerRetry(threadId, text, images = [], { initialError = null, openTarget = false } = {}) {
+  const startedAt = Date.now();
+  let lastError = initialError;
+  let prepared = false;
+  let attempt = 0;
+
+  while (Date.now() - startedAt < DESKTOP_OWNER_SEND_RETRY_MS) {
+    if (!prepared || openTarget) {
+      await prepareDesktopOwnerForThread(threadId, { sinceMs: startedAt, openTarget });
+      prepared = true;
+      openTarget = false;
+    } else if (attempt > 0) {
+      await sleep(Math.min(6000, 1000 + attempt * 1500));
+    }
+
+    try {
+      return await getCodexIpcClient().startTurn(threadId, text, images);
+    } catch (error) {
+      lastError = error;
+      if (!shouldRetryDesktopOwnerStart(error)) throw error;
+      attempt += 1;
+      if (isIpcConnectionError(error)) throw error;
+    }
+  }
+
+  throw lastError || new Error("Codex Desktop owner was not ready in time");
+}
+
 async function sendToCodex(text, threadId, images = [], { newThread = false } = {}) {
   await refreshCodexHomeContext({ source: "send" });
   if (!ALLOW_WRITE) {
@@ -3003,36 +3242,185 @@ async function sendToCodex(text, threadId, images = [], { newThread = false } = 
     err.status = 404;
     throw err;
   }
+  const cachedThreadNotFound = cachedDesktopThreadNotFoundError(targetThreadId);
+  if (cachedThreadNotFound) throw cachedThreadNotFound;
+  const cachedOwnerUnavailable = cachedDesktopOwnerUnavailableError(targetThreadId);
+  if (cachedOwnerUnavailable) throw cachedOwnerUnavailable;
 
   let result;
   try {
     result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
   } catch (error) {
     const noticeMessage = error?.message || "Codex Desktop rejected the message.";
-    if (isNoOpenOwnerError(error)) {
+    if (isThreadNotFoundError(error)) {
+      rememberDesktopThreadNotFound(targetThreadId, error);
+      const err = codexDesktopThreadNotFoundError(targetThreadId, error);
+      recordNotice(targetThreadId, {
+        severity: "error",
+        title: "Send failed",
+        content: err.message,
+        source: "send"
+      });
+      throw err;
+    }
+    if (isIpcConnectionError(error)) {
       try {
-        const openedAt = Date.now();
-        await openCodexUrl(`codex://threads/${encodeURIComponent(targetThreadId)}`);
-        await getCodexIpcClient().waitForConversationEvent(targetThreadId, { sinceMs: openedAt, timeoutMs: 6000 });
-        await sleep(500);
-        result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
+        result = await retryStartTurnAfterIpcReconnect(targetThreadId, trimmed, normalizedImages);
       } catch (retryError) {
-        const retryMessage = retryError?.message ? ` Last IPC error: ${retryError.message}.` : "";
-        const err = new Error(`Codex Desktop has no open owner for this thread. I tried opening the target conversation; wait for it to finish opening in Codex Desktop, then send again.${retryMessage}`);
-        err.status = 409;
-        recordNotice(targetThreadId, {
-          severity: "error",
-          title: "Send failed",
-          content: err.message,
-          source: "send"
+        if (isDesktopFollowUnavailableError(retryError)) {
+          rememberDesktopOwnerUnavailable(targetThreadId, retryError);
+          const err = codexDesktopOwnerUnavailableError(targetThreadId, retryError);
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
+        if (isThreadNotFoundError(retryError)) {
+          rememberDesktopThreadNotFound(targetThreadId, retryError);
+          const err = codexDesktopThreadNotFoundError(targetThreadId, retryError);
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
+        if (!ALLOW_APP_SERVER_SEND_FALLBACK) {
+          const retryMessage = retryError?.message ? ` Last IPC error: ${retryError.message}.` : "";
+          const err = new Error(`Codex Desktop IPC is disconnected. Reopen Codex Desktop or open the target conversation in Codex Desktop, then send again.${retryMessage}`);
+          err.status = 503;
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
+        try {
+          result = await startTurnViaAppServer(targetThreadId, trimmed, normalizedImages);
+          return {
+            ok: true,
+            mode: "app-server-fallback",
+            threadId: targetThreadId,
+            images: normalizedImages.map(({ name, mimeType, size }) => ({ name, mimeType, size })),
+            turnId: result?.turn?.id || result?.turnId || null,
+            fallbackReason: retryError?.message || error?.message || null,
+            sentAt: new Date().toISOString()
+          };
+        } catch (fallbackError) {
+          const retryMessage = retryError?.message ? ` Last IPC error: ${retryError.message}.` : "";
+          const fallbackMessage = fallbackError?.message ? ` App-server fallback error: ${fallbackError.message}.` : "";
+          const err = new Error(`Codex Desktop IPC is disconnected and recovery failed.${retryMessage}${fallbackMessage}`);
+          err.status = 503;
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
+      }
+    } else if (isNoOpenOwnerError(error)) {
+      try {
+        result = await startTurnViaDesktopWithOwnerRetry(targetThreadId, trimmed, normalizedImages, {
+          initialError: error,
+          openTarget: true
         });
-        throw err;
+      } catch (retryError) {
+        if (isDesktopFollowUnavailableError(retryError)) {
+          rememberDesktopOwnerUnavailable(targetThreadId, retryError);
+          const err = codexDesktopOwnerUnavailableError(targetThreadId, retryError);
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
+        if (isThreadNotFoundError(retryError)) {
+          rememberDesktopThreadNotFound(targetThreadId, retryError);
+          const err = codexDesktopThreadNotFoundError(targetThreadId, retryError);
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
+        if (!ALLOW_APP_SERVER_SEND_FALLBACK) {
+          const retryMessage = retryError?.message ? ` Last IPC error: ${retryError.message}.` : "";
+          const err = new Error(`Codex Desktop did not take ownership of this conversation in time. Open the target conversation in Codex Desktop, then send again.${retryMessage}`);
+          err.status = 409;
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
+        try {
+          result = await startTurnViaAppServer(targetThreadId, trimmed, normalizedImages);
+          return {
+            ok: true,
+            mode: "app-server-fallback",
+            threadId: targetThreadId,
+            images: normalizedImages.map(({ name, mimeType, size }) => ({ name, mimeType, size })),
+            turnId: result?.turn?.id || result?.turnId || null,
+            fallbackReason: retryError?.message || error?.message || null,
+            sentAt: new Date().toISOString()
+          };
+        } catch (fallbackError) {
+          const retryMessage = retryError?.message ? ` Last IPC error: ${retryError.message}.` : "";
+          const fallbackMessage = fallbackError?.message ? ` App-server fallback error: ${fallbackError.message}.` : "";
+          const err = new Error(`Codex Desktop has no open owner for this thread. I tried opening the target conversation and app-server fallback, but send still failed.${retryMessage}${fallbackMessage}`);
+          err.status = 409;
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
       }
     } else if (isIpcTimeoutError(error)) {
       try {
-        await sleep(750);
-        result = await getCodexIpcClient().startTurn(targetThreadId, trimmed, normalizedImages);
+        result = await startTurnViaDesktopWithOwnerRetry(targetThreadId, trimmed, normalizedImages, {
+          initialError: error,
+          openTarget: true
+        });
       } catch (retryError) {
+        if (isDesktopFollowUnavailableError(retryError)) {
+          rememberDesktopOwnerUnavailable(targetThreadId, retryError);
+          const err = codexDesktopOwnerUnavailableError(targetThreadId, retryError);
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
+        if (isThreadNotFoundError(retryError)) {
+          rememberDesktopThreadNotFound(targetThreadId, retryError);
+          const err = codexDesktopThreadNotFoundError(targetThreadId, retryError);
+          recordNotice(targetThreadId, {
+            severity: "error",
+            title: "Send failed",
+            content: err.message,
+            source: "send"
+          });
+          throw err;
+        }
         const retryMessage = retryError?.message || noticeMessage;
         const err = new Error(`Codex Desktop did not respond to the send request in time. Check that the target conversation is open and try again. Last IPC error: ${retryMessage}`);
         err.status = 503;
@@ -3054,6 +3442,8 @@ async function sendToCodex(text, threadId, images = [], { newThread = false } = 
       throw error;
     }
   }
+  desktopThreadNotFoundCache.delete(String(targetThreadId));
+  desktopOwnerUnavailableCache.delete(String(targetThreadId));
   return {
     ok: true,
     mode: "desktop-ipc",
@@ -3073,6 +3463,192 @@ function conversationIdFromStartConversation(response) {
 function turnIdFromStartConversation(response) {
   const result = response?.result;
   return firstString(result?.turn?.id, result?.turnId, result?.turn_id, response?.turnId, response?.turn_id);
+}
+
+async function retryStartTurnAfterIpcReconnect(threadId, text, images = []) {
+  const client = getCodexIpcClient();
+  client.close();
+  try {
+    await openCodexUrl(`codex://threads/${encodeURIComponent(threadId)}`);
+  } catch {
+    // The reconnect attempt can still succeed if Codex Desktop is already open.
+  }
+  await sleep(1000);
+  return getCodexIpcClient().startTurn(threadId, text, images);
+}
+
+function appServerInputFromText(text) {
+  const trimmed = String(text || "").trim();
+  return trimmed ? [{ type: "text", text: trimmed, text_elements: [] }] : [];
+}
+
+
+async function startTurnViaAppServer(threadId, text, images = []) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(CODEX_CLI, ["app-server"], {
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, CODEX_HOME: codexHomeState.home }
+    });
+    const stderr = [];
+    let settled = false;
+    let startedTurnId = "";
+    let keepaliveTimer = null;
+    const cleanup = () => {
+      clearTimeout(startTimer);
+      clearTimeout(keepaliveTimer);
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // Ignore app-server shutdown errors.
+      }
+    };
+    const failBeforeStart = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const resolveStarted = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(startTimer);
+      startedTurnId = result?.turn?.id || result?.turnId || "";
+      keepaliveTimer = setTimeout(cleanup, APP_SERVER_TURN_KEEPALIVE_MS);
+      resolve(result || {});
+    };
+    const startTimer = setTimeout(() => {
+      failBeforeStart(new Error(`codex app-server turn/start timed out. ${stderr.join("").trim()}`.trim()));
+    }, APP_SERVER_TURN_START_TIMEOUT_MS);
+    const rl = readline.createInterface({ input: child.stdout });
+    rl.on("line", (line) => {
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (message?.id != null) {
+        if (message.error) {
+          const err = new Error(message.error.message || `app-server request ${message.id} failed`);
+          err.code = message.error.code;
+          err.data = message.error.data;
+          if (!settled) failBeforeStart(err);
+          else cleanup();
+          return;
+        }
+        if (message.id === 2) resolveStarted(message.result || {});
+        return;
+      }
+      if (message?.method === "turn/completed" && message.params?.threadId === threadId) {
+        const completedTurnId = message.params?.turn?.id || "";
+        if (!startedTurnId || !completedTurnId || completedTurnId === startedTurnId) cleanup();
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr.push(String(chunk));
+      const text = stderr.join("");
+      if (text.length > 4000) stderr.splice(0, stderr.length, text.slice(-4000));
+    });
+    child.on("error", failBeforeStart);
+    child.on("exit", (code) => {
+      if (!settled) failBeforeStart(new Error(`codex app-server exited with code ${code}. ${stderr.join("").trim()}`.trim()));
+    });
+    const input = appServerInputFromText(text).concat(
+      images.map((image) => ({
+        type: "image",
+        url: `data:${image.mimeType};base64,${image.data}`
+      }))
+    );
+    for (const message of [
+      {
+        method: "initialize",
+        id: 0,
+        params: {
+          clientInfo: {
+            name: "codex_lan_companion",
+            title: "Codex LAN Companion",
+            version: "0.1.0"
+          },
+          capabilities: { experimentalApi: true }
+        }
+      },
+      { method: "initialized", params: {} },
+      {
+        method: "thread/resume",
+        id: 1,
+        params: {
+          threadId,
+          excludeTurns: true,
+          model: APP_SERVER_MODEL,
+          modelProvider: APP_SERVER_MODEL_PROVIDER
+        }
+      },
+      {
+        method: "turn/start",
+        id: 2,
+        params: {
+          threadId,
+          input,
+          clientUserMessageId: randomUUID()
+        }
+      }
+    ]) {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    }
+  });
+}
+
+async function steerCodexTurn({ threadId, turnId, message } = {}) {
+  await refreshCodexHomeContext({ source: "steer" });
+  if (!ALLOW_WRITE) {
+    const err = new Error("Read-only mode is enabled. Restart without --readonly to control Codex Desktop.");
+    err.status = 403;
+    throw err;
+  }
+  const targetThreadId = String(threadId || "").trim();
+  const expectedTurnId = String(turnId || "").trim();
+  const trimmed = String(message || "").trim();
+  if (!targetThreadId) {
+    const err = new Error("No target thread selected");
+    err.status = 400;
+    throw err;
+  }
+  if (!expectedTurnId) {
+    const err = new Error("No active turn id available yet. Wait for Codex to start thinking, then try again.");
+    err.status = 409;
+    throw err;
+  }
+  if (!trimmed) {
+    const err = new Error("Message is empty");
+    err.status = 400;
+    throw err;
+  }
+  if (trimmed.length > 12000) {
+    const err = new Error("Message is too long");
+    err.status = 400;
+    throw err;
+  }
+  try {
+    const response = await getCodexIpcClient().steerTurn(targetThreadId, expectedTurnId, trimmed);
+    return {
+      ok: true,
+      mode: "desktop-ipc",
+      threadId: targetThreadId,
+      turnId: response?.result?.turnId || expectedTurnId,
+      steeredAt: new Date().toISOString()
+    };
+  } catch (ipcError) {
+    const err = new Error(`Could not steer the active turn in Codex Desktop. ${ipcError?.message || ipcError}`);
+    err.status = 503;
+    recordNotice(targetThreadId, {
+      severity: "error",
+      title: "Steer failed",
+      content: err.message,
+      source: "steer"
+    });
+    throw err;
+  }
 }
 
 async function startNewCodexThread(text) {
@@ -3205,11 +3781,31 @@ async function openCodexUrl(url) {
 
 function isNoOpenOwnerError(error) {
   const message = String(error?.message || "");
-  return message === "no-client-found" || message.includes("thread-role-timeout");
+  return message === "no-client-found" || message.includes("thread-role-timeout") || isThreadNotFoundError(error);
+}
+
+function isThreadNotFoundError(error) {
+  const message = String(error?.message || "");
+  return /thread not found/i.test(message) || /AppServerRequestError\(-32600\)/.test(message);
 }
 
 function isIpcTimeoutError(error) {
   return /timed out/i.test(String(error?.message || ""));
+}
+
+function isDesktopFollowUnavailableError(error) {
+  return error?.code === "desktop_follow_unavailable";
+}
+
+function isIpcConnectionError(error) {
+  const message = String(error?.message || "");
+  return (
+    error?.code === "ECONNREFUSED" ||
+    /ECONNREFUSED/i.test(message) ||
+    /IPC socket not found/i.test(message) ||
+    /IPC is not connected/i.test(message) ||
+    /IPC connection closed/i.test(message)
+  );
 }
 
 async function interruptCodex(threadId) {
@@ -3614,6 +4210,12 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, await interruptCodex(body.threadId));
       return;
     }
+    if (req.method === "POST" && url.pathname === "/api/steer") {
+      if (!requireAuthorized(req, res, url)) return;
+      const body = await readJsonBody(req);
+      sendJson(res, 200, await steerCodexTurn(body));
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/api/approval") {
       if (!requireAuthorized(req, res, url)) return;
       const body = await readJsonBody(req);
@@ -3659,7 +4261,11 @@ const server = http.createServer(async (req, res) => {
     await serveStatic(res, decodeURIComponent(url.pathname));
   } catch (error) {
     logError(`[http:error] ${requestMethod} ${url.pathname}: ${error?.stack || error?.message || String(error)}`);
-    sendJson(res, error.status || 500, { error: error.message || "Internal server error" });
+    const payload = { error: error.message || "Internal server error" };
+    if (error.code) payload.code = error.code;
+    if (error.threadId) payload.threadId = error.threadId;
+    if (error.refreshThreads) payload.refreshThreads = true;
+    sendJson(res, error.status || 500, payload);
   }
 });
 

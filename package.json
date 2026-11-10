@@ -22,6 +22,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "test": "node --test test/*.test.js",
     "check": "node --check server.js && node --check public/app.js",
     "start": "node server.js",
     "start:readonly": "node server.js --readonly",

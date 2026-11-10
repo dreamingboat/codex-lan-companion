@@ -44,6 +44,7 @@ Important compatibility note: this first release was developed and verified only
 - Access-code protected API by default
 - Friendly access-code prompt in the browser
 - Writable by default for sending messages back to Codex Desktop
+- Text steering during an active task when supported by the connected Codex Desktop IPC
 - Optional `--readonly` mode for view-only use
 - Terminal QR code sign-in for browser devices
 
@@ -281,6 +282,9 @@ The server never returns Codex auth tokens to the browser.
 - Compatibility is tied to Codex Desktop local storage and private IPC behavior. Future Codex Desktop updates may break conversation sync, account display, approvals, plugin mentions, sending, or interruption support.
 - Sync is near-real-time rather than push-perfect. Conversation data is refreshed frequently, but some Codex Desktop UI-only states may appear with delay or may not be detectable.
 - For performance, the web UI syncs a recent message window by default instead of the full conversation history. Older tool messages and ordinary folded notices outside the most recent message range may be omitted from the browser view. Important notices, approval cards, and recent visible user/assistant messages are prioritized.
+- The default message window is 80 entries. Older tool output and ordinary notices outside the latest 10 raw messages are omitted. Large conversations are read from the tail; when too few visible messages are found, the server expands the scan up to 64 MiB. This is not a full-history browser.
+- While a task is running, text in the composer is sent as steering; an empty composer keeps the Stop action. Steering requires an active turn ID and Desktop support, and currently accepts text only. It stays on Desktop IPC rather than silently creating an independent app-server session.
+- Automatic approval-review records and internal Guardian review chats are hidden; actionable approval cards remain in the original conversation.
 - Some Codex Desktop prompts, warnings, or approval states may not be fully actionable from the web UI. Keep Codex Desktop accessible for fallback.
 - New conversations created by the web UI may not appear immediately in Codex Desktop's own sidebar; Codex Desktop appears to refresh its list on its own schedule.
 - This is intended for trusted LAN use. It is not hardened for public internet exposure.

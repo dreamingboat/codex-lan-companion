@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Adapt to installed Desktop IPC versions and share concurrent connection attempts.
+- Hide internal Guardian review chats and automatic approval-review records.
+- Expand bounded tail scans when tool-heavy conversations contain too few visible messages.
+- Read plan usage backwards in bounded chunks and stop old timestamps from keeping finished turns active.
+- Recover Desktop-owned sends after owner discovery or IPC reconnection; report missing threads with structured errors.
+- Send text steering through Desktop's follower interface and keep steering failures on the Desktop path.
+- Document recent-message limits and add regression tests for sync, steering, and thread visibility.
+
 ## 0.1.0
 
 Initial public release.
