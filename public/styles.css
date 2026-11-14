@@ -770,6 +770,78 @@ h2 {
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), inset 3px 0 0 #c75b55;
 }
 
+.message.question .bubble {
+  border-color: var(--border);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.question-answer-form + .question-answer-form,
+.question-result + .question-title {
+  margin-top: 18px;
+}
+
+.question-title {
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.question-option,
+.question-submit {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.question-submit {
+  margin-top: 8px;
+}
+
+.question-answer-input {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.question-result {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.question-error {
+  color: #a32d2d;
+  overflow-wrap: anywhere;
+}
+
+.question-option:disabled,
+.question-submit:disabled,
+.question-answer-input:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .message.interaction .message-meta {
   color: #95524d;
 }

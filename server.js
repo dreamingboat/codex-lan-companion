@@ -255,6 +255,7 @@ const messageCache = new Map();
 const recentNotices = [];
 const desktopThreadNotFoundCache = new Map();
 const desktopOwnerUnavailableCache = new Map();
+const userQuestionSubmissions = new Map();
 let codexIpcClient = null;
 let accountCache = null;
 let threadAccountCache = null;
@@ -570,6 +571,7 @@ function clearHomeScopedCaches() {
   messageCache.clear();
   desktopThreadNotFoundCache.clear();
   desktopOwnerUnavailableCache.clear();
+  userQuestionSubmissions.clear();
   recentNotices.splice(0, recentNotices.length);
   codexIpcClient?.clearHomeScopedState?.();
 }
@@ -2116,6 +2118,7 @@ function redactLargePayloads(value, depth = 0) {
 }
 
 function isInteractionPayload(payload) {
+  if (String(payload?.name || "").split(".").at(-1) === "request_user_input_async") return false;
   if (isApprovalDecisionPayload(payload)) return false;
   const toolArguments = parseMaybeJsonObject(payload?.arguments);
   const params = payload?.params || payload?.payload || {};
@@ -2317,6 +2320,8 @@ function interactionPayloadPriority(payload) {
 }
 
 function messageFromInteractionEvent(timestamp, payload, meta = {}) {
+  const question = messageFromUserQuestion(timestamp, payload, meta);
+  if (question) return question;
   if (!isInteractionPayload(payload)) return null;
   const approvalKind = approvalKindFromPayload(payload);
   return {
@@ -2330,6 +2335,30 @@ function messageFromInteractionEvent(timestamp, payload, meta = {}) {
     canApprove: Boolean(approvalKind),
     content: interactionContent(payload),
     requiresDesktopAction: true
+  };
+}
+
+function messageFromUserQuestion(timestamp, payload, meta = {}) {
+  let questions;
+  let itemId;
+  if (String(payload?.name || "").split(".").at(-1) === "request_user_input_async") {
+    questions = parseMaybeJsonObject(payload.arguments || payload.input)?.questions;
+    itemId = payload.call_id || payload.callId;
+  } else if (payload?.type === "item_completed" && String(payload.item?.type || "").toLowerCase() === "agentmessage") {
+    questions = payload.item.questions;
+    itemId = payload.item.id;
+  }
+  if (typeof itemId !== "string" || !itemId || !Array.isArray(questions) || !questions.length || questions.length > 10) return null;
+  if (!questions.every((q) => typeof q?.title === "string" && q.title.trim() && q.title.length <= 4000 &&
+    (q.options == null || (Array.isArray(q.options) && q.options.length <= 20 && q.options.every((option) => typeof option === "string" && option.length <= 2000))))) return null;
+  return {
+    role: "interaction", kind: "user_question", timestamp, ...meta,
+    requestId: itemId, title: "User input requested", canApprove: false, requiresDesktopAction: false,
+    content: questions.map((q) => q.title).join("\n\n"),
+    questions: questions.map((q, index) => ({
+      id: JSON.stringify(["request_user_input_async", itemId, index]),
+      title: q.title, options: q.options || [], status: "pending"
+    }))
   };
 }
 
@@ -2347,6 +2376,7 @@ function interactionContentField(content, label) {
 
 function interactionDedupeKey(message) {
   if (message?.role !== "interaction") return "";
+  if (message.kind === "user_question") return `user_question:${message.requestId}`;
   const prompt = interactionContentField(message.content, "Prompt");
   const command = normalizeApprovalCommandForKey(interactionContentField(message.content, "Command"));
   const workdir = interactionContentField(message.content, "Workdir");
@@ -2425,6 +2455,7 @@ function isInternalContextMessage(message) {
 function shouldAlwaysReturnMessage(message, status = {}) {
   if (!message) return false;
   if (isAutomaticApprovalReviewMessage(message)) return false;
+  if (message.kind === "user_question") return message.questions?.some((q) => q.status === "pending");
   if (message.requiresDesktopAction) return true;
   if (message.role === "interaction") return Boolean(status.interactionRequired && message.source === "desktop-ipc" && message.canApprove);
   if (message.role === "notice") return isImportantNoticeMessage(message);
@@ -2490,12 +2521,46 @@ function mergeToolImagesIntoReplies(messages) {
   return grouped;
 }
 
-function limitMessagesForClient(messages, status = {}, limit = DEFAULT_MESSAGE_LIMIT) {
+function questionAnswersFromText(text) {
+  const value = String(text || "").trim();
+  const open = "<send_user_message_question_reply>";
+  const close = "</send_user_message_question_reply>";
+  if (!value.startsWith(open) || !value.endsWith(close)) return [];
+  try {
+    const parsed = JSON.parse(value.slice(open.length, -close.length));
+    const answers = Array.isArray(parsed) ? parsed : [parsed];
+    return answers.length && answers.every((answer) => typeof answer?.questionItemId === "string" && typeof answer.question === "string" && typeof answer.answer === "string") ? answers : [];
+  } catch {
+    return [];
+  }
+}
+
+function resolveUserQuestionMessages(messages, submitted = new Map()) {
+  const answers = new Map(submitted);
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    for (const reply of questionAnswersFromText(message.content)) answers.set(reply.questionItemId, reply.answer);
+  }
+  return messages.map((message, index) => {
+    if (message.kind === "user_question") {
+      const expired = messages.slice(index + 1).some((later) => later.role === "user" && !questionAnswersFromText(later.content).length &&
+        (!message.turnId || !later.turnId || later.turnId !== message.turnId));
+      return { ...message, questions: message.questions.map((q) => ({
+        ...q, status: answers.has(q.id) ? "answered" : expired ? "expired" : "pending",
+        answer: answers.has(q.id) ? answers.get(q.id) : null
+      })) };
+    }
+    const replies = message.role === "user" ? questionAnswersFromText(message.content) : [];
+    return replies.length ? { ...message, content: replies.map((reply) => `${reply.question}\n${reply.answer}`).join("\n\n") } : message;
+  });
+}
+
+function limitMessagesForClient(messages, status = {}, limit = DEFAULT_MESSAGE_LIMIT, submittedAnswers = new Map()) {
   const normalizedLimit = normalizeMessageLimit(limit);
   const sorted = Array.isArray(messages)
     ? messages.filter((message) => message && !isInternalContextMessage(message) && !isAutomaticApprovalReviewMessage(message)).sort(messageSortCompare)
     : [];
-  const grouped = mergeToolImagesIntoReplies(sorted);
+  const grouped = mergeToolImagesIntoReplies(resolveUserQuestionMessages(sorted, submittedAnswers));
   const recentLowPriorityKeys = new Set(grouped.slice(-10).filter(isLowPriorityHiddenByDefaultMessage).map(clientMessageKey));
   const visiblePriorityMessages = grouped.filter((message) => !isLowPriorityHiddenByDefaultMessage(message) || recentLowPriorityKeys.has(clientMessageKey(message)));
   if (visiblePriorityMessages.length <= normalizedLimit) {
@@ -2813,7 +2878,7 @@ function parseRolloutLine(line, state) {
     }
     if (entry.type === "response_item") {
       const messageMeta = {
-        turnId: state.activeTurn?.turnId || state.messageTurnId || null,
+        turnId: entry.payload?.internal_chat_message_metadata_passthrough?.turn_id || state.activeTurn?.turnId || state.messageTurnId || null,
         turnStartedAtMs: state.activeTurn?.startedAtMs || null
       };
       const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
@@ -2854,8 +2919,9 @@ function rolloutResultFromState({ filePath, stat, nowMs, state, partial = false 
   const activeTurnStale = Boolean(state.activeTurn && nowMs - activeTurnLastUpdatedAtMs > ACTIVE_TURN_STALE_MS);
   const visibleActiveTurn = activeTurnStale ? null : state.activeTurn;
   for (const message of state.interactionMessages) {
-    message.requiresDesktopAction = Boolean(visibleActiveTurn && (!message.turnId || message.turnId === visibleActiveTurn.turnId));
+    message.requiresDesktopAction = message.kind !== "user_question" && Boolean(visibleActiveTurn && (!message.turnId || message.turnId === visibleActiveTurn.turnId));
   }
+  const questions = state.interactionMessages.filter((message) => message.kind === "user_question");
   const pendingInteractions = state.interactionMessages.filter((message) => message.requiresDesktopAction);
   const activeTurnWaitMs = visibleActiveTurn?.startedAtMs ? nowMs - visibleActiveTurn.startedAtMs : 0;
   return {
@@ -2874,7 +2940,7 @@ function rolloutResultFromState({ filePath, stat, nowMs, state, partial = false 
       staleTurnId: activeTurnStale ? state.activeTurn?.turnId || null : null,
       staleTurnLastUpdatedAtMs: activeTurnStale ? activeTurnLastUpdatedAtMs : null
     },
-    messages: dedupeInteractionMessages([...chatMessages, ...pendingInteractions, ...state.noticeMessages, ...state.toolMessages]).sort(messageSortCompare)
+    messages: dedupeInteractionMessages([...chatMessages, ...pendingInteractions, ...questions, ...state.noticeMessages, ...state.toolMessages]).sort(messageSortCompare)
   };
 }
 
@@ -2975,10 +3041,13 @@ async function getMessages(id, { limit = DEFAULT_MESSAGE_LIMIT } = {}) {
   const ipcNotices = codexIpcClient?.getRecentNoticeMessages(id) || [];
   const serverNotices = getRecentNoticeMessages(id);
   const liveMessages = [...ipcInteractions, ...ipcNotices, ...serverNotices];
+  const submittedAnswers = new Map([...userQuestionSubmissions.entries()]
+    .filter(([, value]) => value.threadId === id && value.status === "submitted")
+    .map(([questionId, value]) => [questionId, value.answer]));
   const rolloutPath = resolveRolloutPath(thread.rolloutPath);
   if (!rolloutPath || !existsSync(rolloutPath)) {
     const messages = dedupeInteractionMessages(liveMessages).sort(messageSortCompare);
-    const limited = limitMessagesForClient(messages, { thinking: false, interactionRequired: ipcInteractions.some((message) => message.requiresDesktopAction) }, limit);
+    const limited = limitMessagesForClient(messages, { thinking: false, interactionRequired: ipcInteractions.some((message) => message.requiresDesktopAction) }, limit, submittedAnswers);
     return {
       thread,
       meta: {},
@@ -2997,7 +3066,7 @@ async function getMessages(id, { limit = DEFAULT_MESSAGE_LIMIT } = {}) {
   }
   const parsed = await parseRollout(rolloutPath, { limit, preferTail: true });
   if (!liveMessages.length) {
-    const limited = limitMessagesForClient(parsed.messages, parsed.status, limit);
+    const limited = limitMessagesForClient(parsed.messages, parsed.status, limit, submittedAnswers);
     return { thread, ...parsed, ...limited };
   }
   const status = {
@@ -3005,7 +3074,7 @@ async function getMessages(id, { limit = DEFAULT_MESSAGE_LIMIT } = {}) {
     interactionRequired: parsed.status?.interactionRequired || ipcInteractions.some((message) => message.requiresDesktopAction)
   };
   const messages = dedupeInteractionMessages([...parsed.messages, ...liveMessages]).sort(messageSortCompare);
-  const limited = limitMessagesForClient(messages, status, limit);
+  const limited = limitMessagesForClient(messages, status, limit, submittedAnswers);
   return {
     thread,
     ...parsed,
@@ -3281,7 +3350,7 @@ async function startTurnViaDesktopWithOwnerRetry(threadId, text, images = [], { 
   throw lastError || new Error("Codex Desktop owner was not ready in time");
 }
 
-async function sendToCodex(text, threadId, images = [], { newThread = false } = {}) {
+async function sendToCodex(text, threadId, images = [], { newThread = false, allowAppServerFallback = ALLOW_APP_SERVER_SEND_FALLBACK } = {}) {
   await refreshCodexHomeContext({ source: "send" });
   if (!ALLOW_WRITE) {
     const err = new Error("Read-only mode is enabled. Restart without --readonly to send messages to Codex Desktop.");
@@ -3380,7 +3449,7 @@ async function sendToCodex(text, threadId, images = [], { newThread = false } = 
           });
           throw err;
         }
-        if (!ALLOW_APP_SERVER_SEND_FALLBACK) {
+        if (!allowAppServerFallback) {
           const retryMessage = retryError?.message ? ` Last IPC error: ${retryError.message}.` : "";
           const err = new Error(`Codex Desktop IPC is disconnected. Reopen Codex Desktop or open the target conversation in Codex Desktop, then send again.${retryMessage}`);
           err.status = 503;
@@ -3446,7 +3515,7 @@ async function sendToCodex(text, threadId, images = [], { newThread = false } = 
           });
           throw err;
         }
-        if (!ALLOW_APP_SERVER_SEND_FALLBACK) {
+        if (!allowAppServerFallback) {
           const retryMessage = retryError?.message ? ` Last IPC error: ${retryError.message}.` : "";
           const err = new Error(`Codex Desktop did not take ownership of this conversation in time. Open the target conversation in Codex Desktop, then send again.${retryMessage}`);
           err.status = 409;
@@ -3935,6 +4004,88 @@ async function interruptCodex(threadId) {
   };
 }
 
+async function answerUserQuestions({ threadId, answers } = {}) {
+  if (!ALLOW_WRITE) {
+    const error = new Error("Read-only mode is enabled.");
+    error.status = 403;
+    throw error;
+  }
+  if (typeof threadId !== "string" || !threadId.trim() || !Array.isArray(answers) || !answers.length || answers.length > 10) {
+    const error = new Error("A conversation and at least one answer are required.");
+    error.status = 400;
+    throw error;
+  }
+  const ids = new Set();
+  for (const answer of answers) {
+    if (typeof answer?.questionItemId !== "string" || ids.has(answer.questionItemId) ||
+      typeof answer.answer !== "string" || !answer.answer.trim() || answer.answer.length > 4000) {
+      const error = new Error("Each answer must have a unique question ID and non-empty text of at most 4000 characters.");
+      error.status = 400;
+      throw error;
+    }
+    ids.add(answer.questionItemId);
+  }
+  await refreshCodexHomeContext({ source: "question-answer" });
+  const homeVersion = `${codexHomeState.home}:${codexHomeState.version}`;
+  const data = await getMessages(threadId);
+  if (homeVersion !== `${codexHomeState.home}:${codexHomeState.version}`) {
+    const error = new Error("The Codex account changed. Refresh the conversation before answering.");
+    error.status = 409;
+    throw error;
+  }
+  const questions = new Map(data.messages.filter((m) => m.kind === "user_question").flatMap((m) => m.questions.map((q) => [q.id, q])));
+  const replies = [];
+  for (const answer of answers) {
+    const question = questions.get(answer.questionItemId);
+    const cached = userQuestionSubmissions.get(answer.questionItemId);
+    const text = answer.answer.trim();
+    if (cached?.status === "submitting" || (cached && cached.threadId !== threadId)) {
+      const error = new Error("This question is already being submitted or belongs to another conversation.");
+      error.status = 409;
+      throw error;
+    }
+    if (cached?.status === "submitted" || question?.status === "answered") {
+      if ((cached?.answer ?? question.answer) === text) continue;
+      const error = new Error("This question has already been answered.");
+      error.status = 409;
+      throw error;
+    }
+    if (!question || question.status !== "pending") {
+      const error = new Error("This question is no longer available for an answer. Refresh the conversation.");
+      error.status = 409;
+      throw error;
+    }
+    replies.push({ questionItemId: question.id, question: question.title, answer: text });
+  }
+  if (!replies.length) return { ok: true, threadId, alreadyAnswered: true };
+  const text = `<send_user_message_question_reply>\n${JSON.stringify(replies)}\n</send_user_message_question_reply>`;
+  if (text.length > 12000) {
+    const error = new Error("The combined answer is too long. Submit one question at a time.");
+    error.status = 400;
+    throw error;
+  }
+  const reservations = replies.map((reply) => {
+    const reservation = { threadId, answer: reply.answer, status: "submitting" };
+    userQuestionSubmissions.set(reply.questionItemId, reservation);
+    return [reply.questionItemId, reservation];
+  });
+  try {
+    const result = data.status?.thinking
+      ? await steerCodexTurn({ threadId, turnId: data.status.turnId, message: text })
+      : await sendToCodex(text, threadId, [], { allowAppServerFallback: false });
+    if (result?.ok !== true) throw new Error("Codex Desktop did not acknowledge the answer.");
+    for (const [id, reservation] of reservations) {
+      if (userQuestionSubmissions.get(id) === reservation) reservation.status = "submitted";
+    }
+    return { ok: true, threadId, answers: replies, mode: result.mode };
+  } catch (error) {
+    for (const [id, reservation] of reservations) {
+      if (userQuestionSubmissions.get(id) === reservation) userQuestionSubmissions.delete(id);
+    }
+    throw error;
+  }
+}
+
 function normalizeApprovalDecision(value) {
   const text = String(value || "").trim();
   if (["accept", "approve", "yes", "true"].includes(text)) return "accept";
@@ -4316,6 +4467,11 @@ const handleRequest = async (req, res) => {
       if (!requireAuthorized(req, res, url)) return;
       const body = await readJsonBody(req);
       sendJson(res, 200, await respondToApproval(body));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/question-answer") {
+      if (!requireAuthorized(req, res, url)) return;
+      sendJson(res, 200, await answerUserQuestions(await readJsonBody(req)));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/account") {

@@ -22,6 +22,7 @@ const state = {
   imageAttachments: [],
   pendingMessages: [],
   approvalSubmissions: {},
+  questionSubmissions: {},
   lastMessagesData: null,
   plugins: [],
   pluginsLoaded: false,
@@ -143,6 +144,13 @@ const I18N = {
     approvalSending: "正在提交审批...",
     approvalDone: "审批已提交",
     approvalFailed: "审批提交失败：{message}",
+    questionTitle: "请回答",
+    questionAnswered: "已回答",
+    questionExpired: "历史问题，已进入后续对话",
+    questionPlaceholder: "填写回答",
+    questionSubmit: "提交回答",
+    questionSubmitting: "正在提交回答...",
+    questionFailed: "回答提交失败：{message}",
     desktopMayNeedAttention: "可能需要桌面处理",
     showUsage: "显示套餐用量",
     send: "发送",
@@ -240,6 +248,13 @@ const I18N = {
     approvalSending: "Submitting approval...",
     approvalDone: "Approval submitted",
     approvalFailed: "Approval failed: {message}",
+    questionTitle: "Answer requested",
+    questionAnswered: "Answered",
+    questionExpired: "Historical question; conversation has moved on",
+    questionPlaceholder: "Your answer",
+    questionSubmit: "Submit answer",
+    questionSubmitting: "Submitting answer...",
+    questionFailed: "Answer failed: {message}",
     desktopMayNeedAttention: "Desktop may need attention",
     showUsage: "Show plan usage",
     send: "Send",
@@ -485,6 +500,48 @@ function formatDuration(ms) {
   if (minutes <= 0) return `${seconds}s`;
   if (seconds === 0) return `${minutes}m`;
   return `${minutes}m${seconds}s`;
+}
+
+function renderUserQuestions(message) {
+  if (message.kind !== "user_question") return "";
+  return message.questions.map((question) => {
+    const submission = state.questionSubmissions[approvalSubmissionKey(state.selectedId, question.id)];
+    const answered = question.status === "answered" || submission?.status === "submitted";
+    const title = `<p class="question-title">${escapeHtml(question.title)}</p>`;
+    if (answered) return `${title}<div class="question-result">${escapeHtml(t("questionAnswered"))}<p>${escapeHtml(question.answer ?? submission?.answer ?? "")}</p></div>`;
+    if (question.status === "expired") return `${title}<div class="question-result">${escapeHtml(t("questionExpired"))}</div>`;
+    if (submission?.status === "submitting") return `${title}<div class="question-result" role="status">${escapeHtml(t("questionSubmitting"))}</div>`;
+    const disabled = state.config?.allowWrite ? "" : " disabled";
+    return `<form class="question-answer-form" data-question-id="${escapeHtml(question.id)}">
+      ${title}
+      <div class="question-options">${question.options.map((option) => `<button class="question-option" type="button"${disabled}>${escapeHtml(option)}</button>`).join("")}</div>
+      <textarea class="question-answer-input" rows="2" maxlength="4000" required placeholder="${escapeHtml(t("questionPlaceholder"))}" aria-label="${escapeHtml(question.title)}"${disabled}>${escapeHtml(submission?.answer || "")}</textarea>
+      <button class="question-submit" type="submit"${disabled}>${escapeHtml(t("questionSubmit"))}</button>
+      ${submission?.error ? `<p class="question-error" role="alert">${escapeHtml(submission.error)}</p>` : ""}
+    </form>`;
+  }).join("");
+}
+
+async function submitUserQuestion(questionId, answer) {
+  if (!state.config?.allowWrite) return;
+  const threadId = state.selectedId;
+  const version = state.codexHomeVersion;
+  const key = approvalSubmissionKey(threadId, questionId);
+  if (state.questionSubmissions[key]?.status === "submitting" || state.questionSubmissions[key]?.status === "submitted") return;
+  state.questionSubmissions[key] = { status: "submitting", answer };
+  renderCurrentMessages(false);
+  try {
+    const result = await postJson("/api/question-answer", { threadId, answers: [{ questionItemId: questionId, answer }] });
+    if (result.ok !== true) throw new Error("Answer was not acknowledged");
+    if (version !== state.codexHomeVersion) return;
+    state.questionSubmissions[key] = { status: "submitted", answer };
+  } catch (error) {
+    if (version !== state.codexHomeVersion) return;
+    state.questionSubmissions[key] = { status: "failed", answer, error: t("questionFailed", { message: error.message }) };
+  }
+  state.messagesSignature = "";
+  renderCurrentMessages(false);
+  refreshSoon(700);
 }
 
 function renderApprovalActions(message) {
@@ -1057,10 +1114,16 @@ function removePendingMessage(id) {
 }
 
 function renderMessages(data) {
+  const activeInput = document.activeElement?.classList?.contains("question-answer-input") ? document.activeElement : null;
+  const focusedQuestion = activeInput?.closest(".question-answer-form")?.dataset.questionId;
+  const selection = activeInput ? [activeInput.selectionStart, activeInput.selectionEnd] : null;
   const selected = state.selectedId === DRAFT_THREAD_ID ? state.draftThread : state.threads.find((thread) => thread.id === state.selectedId);
   els.threadTitle.textContent = selected?.title || data.thread?.title || t("untitled");
   const displayMessages = mergePendingMessages(data);
-  const statusText = data.status?.interactionRequired
+  const pendingQuestion = displayMessages.some((message) => message.questions?.some((q) => q.status === "pending" && state.questionSubmissions[approvalSubmissionKey(state.selectedId, q.id)]?.status !== "submitted"));
+  const statusText = pendingQuestion
+    ? `${t("separator")}${t("questionTitle")}`
+    : data.status?.interactionRequired
     ? `${t("separator")}${t("interactionRequired")}`
     : data.status?.thinking
         ? `${t("separator")}${t("thinking")}`
@@ -1080,11 +1143,12 @@ function renderMessages(data) {
     .map((message) => {
       const isTool = message.role === "tool";
       const isInteraction = message.role === "interaction";
+      const isQuestion = message.kind === "user_question";
       const isNotice = message.role === "notice";
       const noticeKey = isNotice ? noticeCollapseKey(message) : "";
       const noticeCollapsed = isNotice && !isImportantNotice(message) && !state.expandedNotices[noticeKey];
       const hidden = isTool && !state.showTools ? " hidden" : "";
-      const title =
+      const title = isQuestion ? "" :
         isNotice
           ? renderNoticeTitle(message, noticeCollapsed, noticeKey)
           : isTool || isInteraction
@@ -1092,16 +1156,16 @@ function renderMessages(data) {
                 isInteraction ? t("interactionDesktopAction") : message.kind
               )}${isTool ? `${t("separator")}${escapeHtml(message.title || "")}` : ""}</div>`
           : "";
-      const metaTop = messageMetaTop(message, previousUserMessage);
+      const metaTop = isQuestion ? t("questionTitle") : messageMetaTop(message, previousUserMessage);
       const metaBottom = formatMessageDate(message.completedAtMs || message.timestamp);
       if (message.role === "user") previousUserMessage = message;
       const messageArticle = `
-        <article class="message ${escapeHtml(message.role)}${message.kind === "pending" ? " pending" : ""}${hidden}">
-          <div class="role">${roleBadge(message)}</div>
+        <article class="message ${escapeHtml(message.role)}${isQuestion ? " question" : ""}${message.kind === "pending" ? " pending" : ""}${hidden}">
+          <div class="role">${roleBadge(isQuestion ? { role: "assistant" } : message)}</div>
           <div class="bubble">
             ${metaTop ? `<div class="message-meta message-meta-top">${escapeHtml(metaTop)}</div>` : ""}
             ${title}
-            ${message.content && !noticeCollapsed ? renderMarkdownLite(message.content) : ""}
+            ${isQuestion ? renderUserQuestions(message) : message.content && !noticeCollapsed ? renderMarkdownLite(message.content) : ""}
             ${!noticeCollapsed ? renderMessageImages(message) : ""}
             ${renderApprovalActions(message)}
             ${metaBottom ? `<div class="message-meta message-meta-bottom">${escapeHtml(metaBottom)}</div>` : ""}
@@ -1123,6 +1187,13 @@ function renderMessages(data) {
     `
     : "";
   els.messageList.innerHTML = `${messageHtml}${thinkingHtml}`;
+  if (focusedQuestion) {
+    const input = [...els.messageList.querySelectorAll(".question-answer-form")].find((form) => form.dataset.questionId === focusedQuestion)?.querySelector(".question-answer-input");
+    if (input) {
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(...selection);
+    }
+  }
   updateScrollToBottomButton();
 }
 
@@ -1685,6 +1756,7 @@ function applyHomeContext(data) {
   state.threadStatus = null;
   state.pendingMessages = [];
   state.approvalSubmissions = {};
+  state.questionSubmissions = {};
   state.expandedNotices = {};
   state.lastMessagesData = null;
   state.plugins = [];
@@ -1922,6 +1994,11 @@ els.scrollToBottomButton.addEventListener("click", () => {
 });
 
 els.messageList.addEventListener("click", async (event) => {
+  const option = event.target.closest(".question-option");
+  if (option) {
+    if (!option.disabled) await submitUserQuestion(option.closest(".question-answer-form").dataset.questionId, option.textContent);
+    return;
+  }
   const imageButton = event.target.closest(".message-image-open");
   if (imageButton) {
     openImagePreview(imageButton.querySelector(".message-image"));
@@ -1978,6 +2055,18 @@ els.messageList.addEventListener("click", async (event) => {
     state.messagesSignature = "";
     refreshSoon(700);
   }
+});
+
+els.messageList.addEventListener("submit", async (event) => {
+  if (!event.target.matches(".question-answer-form")) return;
+  event.preventDefault();
+  await submitUserQuestion(event.target.dataset.questionId, event.target.querySelector(".question-answer-input").value);
+});
+
+els.messageList.addEventListener("input", (event) => {
+  if (!event.target.matches(".question-answer-input")) return;
+  const key = approvalSubmissionKey(state.selectedId, event.target.closest(".question-answer-form").dataset.questionId);
+  state.questionSubmissions[key] = { ...state.questionSubmissions[key], answer: event.target.value };
 });
 
 window.addEventListener("resize", () => {

@@ -41,6 +41,7 @@ Important compatibility note: this first release was developed and verified only
 - Image attachments when writable
 - Generated-image display alongside the corresponding reply, with uncropped previews and click-to-open original-image dialogs
 - Approval and important notice display when detectable from Codex Desktop events
+- Async question cards with options or a typed answer, submitted through the existing Desktop IPC path
 - New conversation creation from the web UI
 - Access-code protected API by default
 - Friendly access-code prompt in the browser
@@ -297,6 +298,7 @@ The server never returns Codex auth tokens to the browser.
 - Automatic approval-review records and internal Guardian review chats are hidden; actionable approval cards remain in the original conversation.
 - Developer/system instruction messages and source-tagged injected environment or AGENTS.md context are hidden. User-authored rule text, actual errors, quota notices, and approval requests remain eligible for display.
 - Some Codex Desktop prompts, warnings, or approval states may not be fully actionable from the web UI. Keep Codex Desktop accessible for fallback.
+- Question cards currently support `request_user_input_async`. Answered or superseded questions show their result or historical state; submission errors preserve the draft for retry. Other question and elicitation protocols are not covered by this support.
 - New conversations created by the web UI may not appear immediately in Codex Desktop's own sidebar; Codex Desktop appears to refresh its list on its own schedule.
 - This is intended for trusted LAN use. It is not hardened for public internet exposure.
 

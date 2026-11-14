@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Render async user-input questions as actionable cards, submit native question replies through Desktop IPC, and preserve answered, expired, and failed-submission states.
 - Support comma-separated bind addresses so LAN access and an existing Tailscale Serve proxy can coexist; stop startup on any bind failure and close all listeners during shutdown.
 - Decode native generated-image tool output, recover image records split at tail-read boundaries, and merge images into their matching replies without dropping standalone images.
 - Display uncropped image previews with original-image dialogs; load existing generated files separately and reject local-image symlink escapes.
