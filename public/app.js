@@ -63,6 +63,9 @@ const els = {
   threadTitle: document.querySelector("#threadTitle"),
   threadMeta: document.querySelector("#threadMeta"),
   messageList: document.querySelector("#messageList"),
+  imagePreview: document.querySelector("#imagePreview"),
+  imagePreviewImage: document.querySelector("#imagePreviewImage"),
+  imagePreviewClose: document.querySelector("#imagePreviewClose"),
   scrollToBottomButton: document.querySelector("#scrollToBottomButton"),
   refreshButton: document.querySelector("#refreshButton"),
   sidebarToggle: document.querySelector("#sidebarToggle"),
@@ -147,6 +150,8 @@ const I18N = {
     stop: "停止",
     stopCurrentTask: "停止当前任务",
     addImage: "添加图片",
+    viewOriginalImage: "查看原图",
+    closeImage: "关闭图片",
     pickPhoto: "相册",
     pickFile: "文件浏览",
     removeImage: "移除图片",
@@ -242,6 +247,8 @@ const I18N = {
     stop: "Stop",
     stopCurrentTask: "Stop current task",
     addImage: "Add image",
+    viewOriginalImage: "View original image",
+    closeImage: "Close image",
     pickPhoto: "Photos",
     pickFile: "Files",
     removeImage: "Remove image",
@@ -328,6 +335,9 @@ function t(key, values = {}) {
 }
 
 function applyStaticText() {
+  els.imagePreview.setAttribute("aria-label", t("viewOriginalImage"));
+  els.imagePreviewClose.setAttribute("aria-label", t("closeImage"));
+  els.imagePreviewClose.setAttribute("title", t("closeImage"));
   document.documentElement.lang = state.locale === "zh" ? "zh-CN" : "en";
   document.title = t("documentTitle");
   document.querySelector(".auth-card h2").textContent = t("authTitle");
@@ -627,7 +637,7 @@ function renderGeneratedImageMarkdown(text) {
       if (!imagePath.startsWith(generatedRoot)) return _match;
       const tokenParam = state.authToken ? `&token=${encodeURIComponent(state.authToken)}` : "";
       const src = `/api/local-image?path=${encodeURIComponent(imagePath)}${tokenParam}`;
-      return `<img class="message-image generated-image" src="${src}" alt="${alt}" loading="lazy" />`;
+      return `<button class="message-image-open" type="button" title="${escapeHtml(t("viewOriginalImage"))}" aria-label="${escapeHtml(t("viewOriginalImage"))}"><img class="message-image generated-image" src="${src}" alt="${alt}" loading="lazy" /></button>`;
     }
   );
 }
@@ -642,8 +652,11 @@ function renderMessageImages(message) {
   if (!inlineImages.length && !localImages.length) return "";
   const inlineHtml = inlineImages
     .map((src) => {
-      if (typeof src !== "string" || !src.startsWith("data:image/")) return "";
-      return `<img class="message-image" src="${escapeHtml(src)}" alt="" loading="lazy" />`;
+      if (typeof src !== "string") return "";
+      if (src.startsWith("/api/local-image?path=")) {
+        if (state.authToken) src += `&token=${encodeURIComponent(state.authToken)}`;
+      } else if (!src.startsWith("data:image/")) return "";
+      return `<button class="message-image-open" type="button" title="${escapeHtml(t("viewOriginalImage"))}" aria-label="${escapeHtml(t("viewOriginalImage"))}"><img class="message-image" src="${escapeHtml(src)}" alt="" loading="lazy" /></button>`;
     })
     .join("");
   const localHtml = localImages
@@ -664,6 +677,13 @@ function renderPromotedToolImages(message) {
       </div>
     </article>
   `;
+}
+
+function openImagePreview(image) {
+  if (!image) return;
+  els.imagePreviewImage.src = image.currentSrc || image.src;
+  els.imagePreviewImage.alt = image.alt || "";
+  if (!els.imagePreview.open) els.imagePreview.showModal();
 }
 
 function mimeTypeForFile(file) {
@@ -1889,11 +1909,24 @@ els.messageList.addEventListener("scroll", () => {
   updateScrollToBottomButton();
 });
 
+els.imagePreviewClose.addEventListener("click", () => els.imagePreview.close());
+els.imagePreview.addEventListener("click", (event) => {
+  if (event.target === els.imagePreview) els.imagePreview.close();
+});
+els.imagePreview.addEventListener("close", () => {
+  els.imagePreviewImage.removeAttribute("src");
+});
+
 els.scrollToBottomButton.addEventListener("click", () => {
   scrollMessagesToBottom();
 });
 
 els.messageList.addEventListener("click", async (event) => {
+  const imageButton = event.target.closest(".message-image-open");
+  if (imageButton) {
+    openImagePreview(imageButton.querySelector(".message-image"));
+    return;
+  }
   const noticeButton = event.target.closest(".notice-collapse-button");
   if (noticeButton) {
     event.preventDefault();

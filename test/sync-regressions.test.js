@@ -9,6 +9,65 @@ const source = await fs.readFile(new URL("../server.js", import.meta.url), "utf8
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const messageHelpers = section("function messageSortCompare(", "const NOTICE_TYPE_PATTERNS");
 const messageContext = { DEFAULT_MESSAGE_LIMIT: 80, MAX_MESSAGE_LIMIT: 1000 };
+const decodeMessage = vm.runInNewContext([
+  section("function textFromContent(", "const INTERACTION_TYPE_PATTERNS"),
+  section("function messageFromResponseItem(", "function hasDisplayableMessageContent("),
+  "messageFromResponseItem"
+].join("\n"));
+
+test("raw developer and system instructions are not decoded as chat cards", () => {
+  for (const role of ["developer", "system"]) {
+    assert.equal(decodeMessage(null, { type: "message", role, content: [{ type: "input_text", text: "Tools, warnings and limits in internal instructions" }] }), null);
+  }
+});
+
+test("only source-marked injected contexts are removed, not user-authored rule text", () => {
+  for (const kind of ["environments.environment_context", "agents_md.instructions"]) {
+    const content = [{ type: "input_text", text: "# AGENTS.md instructions\n<environment_context>example</environment_context>" }];
+    const payload = { type: "message", role: "user", content };
+    assert.equal(decodeMessage(null, { ...payload, internal_chat_message_metadata_passthrough: { content_item_kinds: [kind] } }), null);
+    assert.equal(decodeMessage(null, payload).content, content[0].text);
+    assert.equal(decodeMessage(null, { ...payload, internal_chat_message_metadata_passthrough: { content_item_kinds: [kind + ".unknown"] } }).content, content[0].text);
+  }
+});
+
+test("mixed user content retains the real prompt and image when injected context is removed", () => {
+  const image = "data:image/png;base64,aGVsbG8=";
+  const message = decodeMessage(null, {
+    type: "message", role: "user",
+    content: [
+      { type: "input_text", text: "<environment_context>internal</environment_context>" },
+      { type: "input_text", text: "Review this image" },
+      { type: "input_image", image_url: image }
+    ],
+    internal_chat_message_metadata_passthrough: { content_item_kinds: ["environments.environment_context", "user", "image"] }
+  });
+  assert.equal(message.content, "Review this image");
+  assert.equal(message.images[0], image);
+});
+
+test("client filtering preserves actual errors, approvals, quota notices and chat images", () => {
+  const limit = vm.runInNewContext(`${messageHelpers}\nlimitMessagesForClient`, messageContext);
+  const messages = [null,
+    { role: "developer", kind: "message", content: "Hidden" },
+    { role: "system", kind: "message", content: "Hidden" },
+    { role: "system", kind: "parse_error", content: "Invalid JSONL record" },
+    { role: "notice", kind: "error", content: "Failure" },
+    { role: "notice", kind: "usage_limit", content: "Quota exceeded" },
+    { role: "interaction", kind: "approval", content: "Confirm", canApprove: true, requiresDesktopAction: true },
+    { role: "assistant", content: "Poster", images: ["/api/local-image?path=poster"] }
+  ];
+  const visible = limit(messages).messages;
+  assert.deepEqual(Array.from(visible, (message) => message.kind || message.role), ["parse_error", "error", "usage_limit", "approval", "assistant"]);
+  assert.equal(visible.at(-1).images.length, 1);
+});
+
+test("internal context does not satisfy the visible-message tail-scan threshold", () => {
+  const count = vm.runInNewContext(`${messageHelpers}\ndefaultVisibleMessageCount`, messageContext);
+  const messages = [null, ...Array.from({ length: 100 }, () => ({ role: "developer", kind: "message" })),
+    { role: "system", kind: "message" }, { role: "user", content: "hello" }, { role: "assistant", content: "reply" }];
+  assert.equal(count(messages), 2);
+});
 
 test("tool output does not count toward the visible messages needed for a tail scan", () => {
   const count = vm.runInNewContext(`${messageHelpers}\ndefaultVisibleMessageCount`, messageContext);

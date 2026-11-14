@@ -39,6 +39,7 @@ Important compatibility note: this first release was developed and verified only
 - Plugin picker in the composer, including friendly plugin chips
 - Skill picker in the composer, including `/` trigger and friendly skill chips
 - Image attachments when writable
+- Generated-image display alongside the corresponding reply, with uncropped previews and click-to-open original-image dialogs
 - Approval and important notice display when detectable from Codex Desktop events
 - New conversation creation from the web UI
 - Access-code protected API by default
@@ -232,7 +233,7 @@ If startup fails because port `8787` is already in use, stop the existing proces
 ## Options
 
 ```text
---host <host>          Bind host. Default: 0.0.0.0
+--host <host[,host]>   Bind one or more hosts. Default: 0.0.0.0
 --port <port>          Bind port. Default: 8787
 --password <password>  Friendly access code. Default: generated 6-digit code per launch
 --token <token>        Alias for --password
@@ -248,6 +249,14 @@ Environment variables are also supported:
 ```bash
 PORT=8790 HOST=0.0.0.0 CODEX_LAN_PASSWORD=home-only codex-lan-companion
 ```
+
+If Tailscale Serve already uses port 8787 on the Tailscale address, bind CLC to loopback and your Mac's LAN IP explicitly:
+
+```bash
+codex-lan-companion --host 127.0.0.1,192.168.1.20
+```
+
+Replace `192.168.1.20` with the Mac's LAN IP. Tailscale can keep forwarding to `http://127.0.0.1:8787`, while LAN devices use `http://192.168.1.20:8787`. Keep the existing HTTPS Tailscale URL for remote access. The same host option can be passed to `codex-lan-companion-install-service` when installing the background service. Update the host list and restart CLC if the LAN IP changes. All requested listeners must start successfully; a bind failure stops the process.
 
 ## Requirements
 
@@ -282,9 +291,11 @@ The server never returns Codex auth tokens to the browser.
 - Compatibility is tied to Codex Desktop local storage and private IPC behavior. Future Codex Desktop updates may break conversation sync, account display, approvals, plugin mentions, sending, or interruption support.
 - Sync is near-real-time rather than push-perfect. Conversation data is refreshed frequently, but some Codex Desktop UI-only states may appear with delay or may not be detectable.
 - For performance, the web UI syncs a recent message window by default instead of the full conversation history. Older tool messages and ordinary folded notices outside the most recent message range may be omitted from the browser view. Important notices, approval cards, and recent visible user/assistant messages are prioritized.
-- The default message window is 80 entries. Older tool output and ordinary notices outside the latest 10 raw messages are omitted. Large conversations are read from the tail; when too few visible messages are found, the server expands the scan up to 64 MiB. This is not a full-history browser.
+- The default message window is 80 entries. Older text-only tool output and ordinary notices outside the latest 10 raw messages are omitted; image output remains eligible for display. Large conversations are read from the tail, with bounded backtracking to recover a record split at the read boundary. When too few visible messages are found, the server expands the scan up to 64 MiB. This is not a full-history browser.
+- Images in supported tool-output records are grouped with the same turn's reply when possible; otherwise they remain standalone. Existing generated files are loaded separately through the authenticated image API instead of repeating Base64 in each sync. Local file serving is limited to `~/.codex/generated_images`, with inline-image fallback when available. Arbitrary project-file links are not served as images.
 - While a task is running, text in the composer is sent as steering; an empty composer keeps the Stop action. Steering requires an active turn ID and Desktop support, and currently accepts text only. It stays on Desktop IPC rather than silently creating an independent app-server session.
 - Automatic approval-review records and internal Guardian review chats are hidden; actionable approval cards remain in the original conversation.
+- Developer/system instruction messages and source-tagged injected environment or AGENTS.md context are hidden. User-authored rule text, actual errors, quota notices, and approval requests remain eligible for display.
 - Some Codex Desktop prompts, warnings, or approval states may not be fully actionable from the web UI. Keep Codex Desktop accessible for fallback.
 - New conversations created by the web UI may not appear immediately in Codex Desktop's own sidebar; Codex Desktop appears to refresh its list on its own schedule.
 - This is intended for trusted LAN use. It is not hardened for public internet exposure.

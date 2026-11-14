@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Support comma-separated bind addresses so LAN access and an existing Tailscale Serve proxy can coexist; stop startup on any bind failure and close all listeners during shutdown.
+- Decode native generated-image tool output, recover image records split at tail-read boundaries, and merge images into their matching replies without dropping standalone images.
+- Display uncropped image previews with original-image dialogs; load existing generated files separately and reject local-image symlink escapes.
+- Hide developer/system instructions and source-tagged injected context without filtering user-authored rule text or actionable notices.
 - Adapt to installed Desktop IPC versions and share concurrent connection attempts.
 - Hide internal Guardian review chats and automatic approval-review records.
 - Expand bounded tail scans when tool-heavy conversations contain too few visible messages.

@@ -54,7 +54,7 @@ Usage:
   codex-lan-companion [options]
 
 Options:
-  --host <host>          Bind host. Default: 0.0.0.0
+  --host <host[,host]>   Bind one or more hosts. Default: 0.0.0.0
   --port <port>          Bind port. Default: 8787
   --password <password>  Friendly access code. Default: generated 6-digit code per launch
   --token <token>        Alias for --password
@@ -182,6 +182,11 @@ process.on("unhandledRejection", (error) => {
 const INITIAL_CODEX_HOME = cli.codexHome || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const CODEX_HOME_FIXED = Boolean(cli.codexHome || process.env.CODEX_LAN_FIXED_CODEX_HOME === "1");
 const HOST = cli.host || process.env.HOST || "0.0.0.0";
+const HOSTS = [...new Set(HOST.split(",").map((host) => host.trim()).filter(Boolean))];
+if (!HOSTS.length) {
+  logError("At least one non-empty --host address is required.");
+  process.exit(1);
+}
 const PORT = Number(cli.port || process.env.PORT || 8787);
 let AUTH_REQUIRED = !cli.noAuth && process.env.CODEX_LAN_NO_AUTH !== "1";
 const ACCESS_TOKEN = cli.password || cli.token || process.env.CODEX_LAN_PASSWORD || process.env.CODEX_LAN_TOKEN || String(randomInt(100000, 1000000));
@@ -2041,6 +2046,20 @@ function imagesFromToolOutput(output) {
   return Array.from(new Set(imageUrlsFromValue(parsed ?? output)));
 }
 
+function generatedImagePathsFromToolOutput(output) {
+  const parsed = parseMaybeJsonValue(output) ?? output;
+  if (!Array.isArray(parsed)) return [];
+  const root = path.resolve(GENERATED_IMAGES_DIR) + path.sep;
+  const paths = parsed.flatMap((part) => {
+    if (part?.type !== "input_text" && part?.type !== "text") return [];
+    const match = String(part.text || "").match(/^Generated images are saved to .+? as (.+?) by default\./s);
+    if (!match) return [];
+    const imagePath = path.resolve(match[1]);
+    return imagePath.startsWith(root) && mimeTypeForAsset(imagePath) && existsSync(imagePath) ? [imagePath] : [];
+  });
+  return [...new Set(paths)];
+}
+
 function compactToolOutput(output, images = []) {
   if (images.length) return `[image output: ${images.length} image${images.length === 1 ? "" : "s"}]`;
   const parsed = parseMaybeJsonValue(output);
@@ -2399,6 +2418,10 @@ function isAutomaticApprovalReviewMessage(message) {
   return /"type"\s*:\s*"automaticApprovalReview"/.test(String(message.content || ""));
 }
 
+function isInternalContextMessage(message) {
+  return message?.role === "developer" || (message?.role === "system" && message.kind === "message");
+}
+
 function shouldAlwaysReturnMessage(message, status = {}) {
   if (!message) return false;
   if (isAutomaticApprovalReviewMessage(message)) return false;
@@ -2411,14 +2434,14 @@ function shouldAlwaysReturnMessage(message, status = {}) {
 function isLowPriorityHiddenByDefaultMessage(message) {
   if (!message) return false;
   if (isAutomaticApprovalReviewMessage(message)) return true;
-  if (message.role === "tool") return true;
+  if (message.role === "tool") return !message.images?.length && !message.localImages?.length;
   if (message.role === "notice" && !isImportantNoticeMessage(message)) return true;
   return false;
 }
 
 function defaultVisibleMessageCount(messages) {
   if (!Array.isArray(messages)) return 0;
-  return messages.filter((message) => !isLowPriorityHiddenByDefaultMessage(message)).length;
+  return messages.filter((message) => message && !isInternalContextMessage(message) && !isLowPriorityHiddenByDefaultMessage(message)).length;
 }
 
 function clientMessageKey(message) {
@@ -2435,13 +2458,46 @@ function clientMessageKey(message) {
     .join(":");
 }
 
+function mergeToolImagesIntoReplies(messages) {
+  const grouped = messages.map((message) => ({ ...message }));
+  for (let index = 0; index < grouped.length; index += 1) {
+    const image = grouped[index];
+    if (image.role !== "tool" || (!image.images?.length && !image.localImages?.length)) continue;
+    let reply = null;
+    for (let next = index + 1; next < grouped.length; next += 1) {
+      const candidate = grouped[next];
+      if (candidate.role === "user" || (image.turnId && candidate.turnId && image.turnId !== candidate.turnId)) break;
+      if (candidate.role !== "assistant" || !String(candidate.content || "").trim()) continue;
+      if (reply?.phase === "final_answer" && candidate.phase !== "final_answer") continue;
+      reply = candidate;
+    }
+    if (!reply && image.turnId) {
+      for (let previous = index - 1; previous >= 0; previous -= 1) {
+        const candidate = grouped[previous];
+        if (candidate.role === "user" || (candidate.turnId && candidate.turnId !== image.turnId)) break;
+        if (candidate.role === "assistant" && candidate.turnId === image.turnId && candidate.phase === "final_answer" && String(candidate.content || "").trim()) {
+          reply = candidate;
+          break;
+        }
+      }
+    }
+    if (!reply) continue;
+    reply.images = [...new Set([...(reply.images || []), ...(image.images || [])])];
+    reply.localImages = [...new Set([...(reply.localImages || []), ...(image.localImages || [])])];
+    image.images = [];
+    image.localImages = [];
+  }
+  return grouped;
+}
+
 function limitMessagesForClient(messages, status = {}, limit = DEFAULT_MESSAGE_LIMIT) {
   const normalizedLimit = normalizeMessageLimit(limit);
   const sorted = Array.isArray(messages)
-    ? messages.filter((message) => !isAutomaticApprovalReviewMessage(message)).sort(messageSortCompare)
+    ? messages.filter((message) => message && !isInternalContextMessage(message) && !isAutomaticApprovalReviewMessage(message)).sort(messageSortCompare)
     : [];
-  const recentLowPriorityKeys = new Set(sorted.slice(-10).filter(isLowPriorityHiddenByDefaultMessage).map(clientMessageKey));
-  const visiblePriorityMessages = sorted.filter((message) => !isLowPriorityHiddenByDefaultMessage(message) || recentLowPriorityKeys.has(clientMessageKey(message)));
+  const grouped = mergeToolImagesIntoReplies(sorted);
+  const recentLowPriorityKeys = new Set(grouped.slice(-10).filter(isLowPriorityHiddenByDefaultMessage).map(clientMessageKey));
+  const visiblePriorityMessages = grouped.filter((message) => !isLowPriorityHiddenByDefaultMessage(message) || recentLowPriorityKeys.has(clientMessageKey(message)));
   if (visiblePriorityMessages.length <= normalizedLimit) {
     return {
       messages: visiblePriorityMessages,
@@ -2637,8 +2693,12 @@ function messageFromResponseItem(timestamp, payload) {
       content: compact(payload.arguments || "")
     };
   }
-  if (payload?.type === "function_call_output") {
-    const images = imagesFromToolOutput(payload.output);
+  if (payload?.type === "function_call_output" || payload?.type === "custom_tool_call_output") {
+    const inlineImages = imagesFromToolOutput(payload.output);
+    const generatedPaths = inlineImages.length ? generatedImagePathsFromToolOutput(payload.output) : [];
+    const images = generatedPaths.length === inlineImages.length && generatedPaths.length
+      ? generatedPaths.map((imagePath) => `/api/local-image?path=${encodeURIComponent(imagePath)}`)
+      : inlineImages;
     return {
       role: "tool",
       kind: "tool_output",
@@ -2649,12 +2709,21 @@ function messageFromResponseItem(timestamp, payload) {
     };
   }
   if (payload?.type === "message") {
+    if (payload.role === "developer" || payload.role === "system") return null;
+    const content = payload.role === "user" && Array.isArray(payload.content)
+      ? payload.content.filter((_part, index) => {
+          const kind = payload.internal_chat_message_metadata_passthrough?.content_item_kinds?.[index];
+          return kind !== "environments.environment_context" && kind !== "agents_md.instructions";
+        })
+      : payload.content;
+    if (Array.isArray(payload.content) && payload.content.length && !content.length) return null;
     return {
       role: payload.role || "assistant",
       kind: "message",
       timestamp,
-      content: stripCodexDirectives(textFromContent(payload.content)),
-      images: imagesFromContent(payload.content)
+      phase: payload.phase || "",
+      content: stripCodexDirectives(textFromContent(content)),
+      images: imagesFromContent(content)
     };
   }
   return null;
@@ -2680,6 +2749,7 @@ function createRolloutParseState(stat, nowMs) {
     activeTurn: null,
     openTurns: new Map(),
     lastEntryAtMs: Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : nowMs,
+    messageTurnId: null,
     assistantMessagesByTurn: new Map()
   };
 }
@@ -2689,6 +2759,7 @@ function parseRolloutLine(line, state) {
   if (!line.trim()) return;
   try {
     const entry = JSON.parse(line);
+    if (entry.type === "event_msg" && entry.payload?.turn_id) state.messageTurnId = entry.payload.turn_id;
     const entryAtMs = Date.parse(entry.timestamp);
     if (Number.isFinite(entryAtMs)) state.lastEntryAtMs = entryAtMs;
     if (entry.type === "session_meta") {
@@ -2719,7 +2790,7 @@ function parseRolloutLine(line, state) {
         return;
       }
       const messageMeta = {
-        turnId: state.activeTurn?.turnId || null,
+        turnId: state.activeTurn?.turnId || state.messageTurnId || null,
         turnStartedAtMs: state.activeTurn?.startedAtMs || null
       };
       const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
@@ -2742,7 +2813,7 @@ function parseRolloutLine(line, state) {
     }
     if (entry.type === "response_item") {
       const messageMeta = {
-        turnId: state.activeTurn?.turnId || null,
+        turnId: state.activeTurn?.turnId || state.messageTurnId || null,
         turnStartedAtMs: state.activeTurn?.startedAtMs || null
       };
       const interaction = messageFromInteractionEvent(entry.timestamp, entry.payload, messageMeta);
@@ -2757,8 +2828,9 @@ function parseRolloutLine(line, state) {
       }
       const msg = messageFromResponseItem(entry.timestamp, entry.payload);
       if (!hasDisplayableMessageContent(msg)) return;
-      if (msg.role === "tool") state.toolMessages.push({ ...msg, lineNumber: state.lineNumber });
-      else state.fallbackMessages.push({ ...msg, lineNumber: state.lineNumber });
+      const message = { ...msg, ...messageMeta, lineNumber: state.lineNumber };
+      if (msg.role === "tool") state.toolMessages.push(message);
+      else state.fallbackMessages.push(message);
     }
   } catch {
     state.fallbackMessages.push({
@@ -2809,17 +2881,36 @@ function rolloutResultFromState({ filePath, stat, nowMs, state, partial = false 
 async function readRolloutTailLines(filePath, stat, limit, maxBytes = TAIL_ROLLOUT_MAX_BYTES) {
   const baseBytes = Math.max(TAIL_ROLLOUT_MIN_BYTES, normalizeMessageLimit(limit) * 24 * 1024);
   const bytes = Math.min(stat.size, maxBytes > TAIL_ROLLOUT_MAX_BYTES ? maxBytes : Math.min(maxBytes, baseBytes));
-  const start = Math.max(0, stat.size - bytes);
+  let start = Math.max(0, stat.size - bytes);
   const handle = await fs.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(stat.size - start);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-    let text = buffer.subarray(0, bytesRead).toString("utf8");
+    const chunks = [buffer.subarray(0, bytesRead)];
+    let completeBoundary = start === 0;
     if (start > 0) {
+      // A generated-image record can be larger than the initial tail window.
+      while (start > 0 && stat.size - start < maxBytes) {
+        const prefixBytes = Math.min(512 * 1024, start, maxBytes - (stat.size - start));
+        const prefix = Buffer.alloc(prefixBytes);
+        start -= prefixBytes;
+        const read = await handle.read(prefix, 0, prefix.length, start);
+        const chunk = prefix.subarray(0, read.bytesRead);
+        const newline = chunk.lastIndexOf(10);
+        if (newline >= 0) {
+          chunks.unshift(chunk.subarray(newline + 1));
+          completeBoundary = true;
+          break;
+        }
+        chunks.unshift(chunk);
+      }
+    }
+    let text = Buffer.concat(chunks).toString("utf8");
+    if (!completeBoundary && start > 0) {
       const firstNewline = text.indexOf("\n");
       text = firstNewline >= 0 ? text.slice(firstNewline + 1) : "";
     }
-    return text.split(/\r?\n/).filter((line) => line.trim());
+    return { lines: text.split(/\r?\n/).filter((line) => line.trim()), bytes: stat.size - start };
   } finally {
     await handle.close();
   }
@@ -2827,11 +2918,11 @@ async function readRolloutTailLines(filePath, stat, limit, maxBytes = TAIL_ROLLO
 
 async function parseRolloutTail(filePath, stat, limit, nowMs, maxBytes = TAIL_ROLLOUT_MAX_BYTES) {
   const state = createRolloutParseState(stat, nowMs);
-  const lines = await readRolloutTailLines(filePath, stat, limit, maxBytes);
+  const { lines, bytes } = await readRolloutTailLines(filePath, stat, limit, maxBytes);
   for (const line of lines) parseRolloutLine(line, state);
   return {
     ...rolloutResultFromState({ filePath, stat, nowMs, state, partial: true }),
-    tailBytes: Math.min(maxBytes, stat.size)
+    tailBytes: bytes
   };
 }
 
@@ -4097,12 +4188,17 @@ async function serveLocalImage(res, filePath) {
     return;
   }
   try {
-    const stat = await fs.stat(normalized);
+    const [realRoot, realPath] = await Promise.all([fs.realpath(root), fs.realpath(normalized)]);
+    if (!realPath.startsWith(realRoot + path.sep)) {
+      sendText(res, 403, "Forbidden");
+      return;
+    }
+    const stat = await fs.stat(realPath);
     if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_LOCAL_IMAGE_BYTES) {
       sendText(res, 404, "Not found");
       return;
     }
-    const data = await fs.readFile(normalized);
+    const data = await fs.readFile(realPath);
     res.writeHead(200, {
       "content-type": mimeType,
       "cache-control": "no-store, must-revalidate"
@@ -4113,7 +4209,7 @@ async function serveLocalImage(res, filePath) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+const handleRequest = async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const requestStartedAt = performance.now();
   const requestMethod = req.method || "UNKNOWN";
@@ -4267,14 +4363,15 @@ const server = http.createServer(async (req, res) => {
     if (error.refreshThreads) payload.refreshThreads = true;
     sendJson(res, error.status || 500, payload);
   }
-});
+};
 
+const servers = HOSTS.map(() => http.createServer(handleRequest));
 let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   logInfo(`[shutdown] Received ${signal}; closing HTTP server and IPC client.`);
-  const closeServer = new Promise((resolve) => {
+  const closeServers = Promise.all(servers.map((server) => new Promise((resolve) => {
     if (!server.listening) {
       resolve();
       return;
@@ -4283,7 +4380,7 @@ async function shutdown(signal) {
       if (error) logFatalError("HTTP server close failed", error);
       resolve();
     });
-  });
+  })));
   const timeout = setTimeout(() => {
     logError("[shutdown] Close timeout reached; forcing exit.");
     process.exit(1);
@@ -4294,20 +4391,20 @@ async function shutdown(signal) {
   } catch (error) {
     logFatalError("IPC client close failed", error);
   }
-  await closeServer;
+  await closeServers;
   clearTimeout(timeout);
   logInfo("[shutdown] Complete.");
   process.exit(0);
 }
 
-server.on("error", (error) => {
+for (const [index, server] of servers.entries()) server.on("error", (error) => {
   if (error?.code === "EADDRINUSE") {
-    logError(`[fatal] Cannot start Codex LAN Companion: ${HOST}:${PORT} is already in use.`);
+    logError(`[fatal] Cannot start Codex LAN Companion: ${HOSTS[index]}:${PORT} is already in use.`);
     logError("Stop the existing service first, choose another --port, or run:");
     logError(`  lsof -nP -iTCP:${PORT} -sTCP:LISTEN`);
     logError("  codex-lan-companion-uninstall-service");
   } else if (error?.code === "EACCES") {
-    logError(`[fatal] Cannot start Codex LAN Companion: permission denied for ${HOST}:${PORT}.`);
+    logError(`[fatal] Cannot start Codex LAN Companion: permission denied for ${HOSTS[index]}:${PORT}.`);
     logError("Choose a different --host/--port or check local firewall and permission settings.");
   } else {
     logFatalError("HTTP server failed to start", error);
@@ -4323,15 +4420,22 @@ process.once("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
-server.listen(PORT, HOST, () => {
-  const localUrl = `http://127.0.0.1:${PORT}/`;
-  const lanUrls = Object.values(os.networkInterfaces())
-    .flat()
-    .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
-    .map((entry) => `http://${entry.address}:${PORT}/`);
+Promise.all(servers.map((server, index) => new Promise((resolve) => server.listen(PORT, HOSTS[index], resolve)))).then(() => {
+  const boundHosts = servers.map((server) => server.address().address);
+  const advertisedHosts = [...new Set(boundHosts.flatMap((host) => {
+    if (host !== "0.0.0.0" && host !== "::") return [host];
+    return ["127.0.0.1", ...Object.values(os.networkInterfaces()).flat()
+      .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
+      .map((entry) => entry.address)];
+  }))];
+  const hostUrl = (host) => `http://${net.isIP(host) === 6 ? `[${host}]` : host}:${PORT}/`;
+  const isLoopback = (host) => host.startsWith("127.") || host === "::1";
+  const localHost = advertisedHosts.find(isLoopback);
+  const localUrl = localHost ? hostUrl(localHost) : null;
+  const lanUrls = advertisedHosts.filter((host) => !isLoopback(host)).map(hostUrl);
   const primaryUrl = lanUrls[0] || localUrl;
   const printRuntimeUrls = () => {
-    logInfo(`Local:  ${localUrl}`);
+    if (localUrl) logInfo(`Local:  ${localUrl}`);
     for (const lanUrl of lanUrls) logInfo(`LAN:    ${lanUrl}`);
   };
   const printQr = () => {
@@ -4374,7 +4478,7 @@ server.listen(PORT, HOST, () => {
         console.log(`Access code: ${ACCESS_TOKEN}`);
         printQr();
       } else if (command === "url") {
-        console.log(`Local:  ${localUrl}`);
+        if (localUrl) console.log(`Local:  ${localUrl}`);
         for (const lanUrl of lanUrls) console.log(`LAN:    ${lanUrl}`);
       } else if (command === "code") {
         console.log(`Access code: ${ACCESS_TOKEN}`);
