@@ -1938,7 +1938,7 @@ async function findThread(id) {
     null;
   const sessionIndexTitles = await readSessionIndexTitleMap();
   const rows = await runSqlJson(`
-    SELECT id, title, rollout_path AS rolloutPath, updated_at_ms AS updatedAtMs
+    SELECT id, title, rollout_path AS rolloutPath, updated_at_ms AS updatedAtMs, cwd
     FROM threads
     WHERE id = '${sqlString(id)}'
     LIMIT 1;
@@ -1986,6 +1986,20 @@ function imagesFromContent(content) {
       return `data:${source.media_type};base64,${source.data}`;
     })
     .filter(Boolean);
+}
+
+function videosFromText(text) {
+  const videos = new Map();
+  const body = String(text || "").replace(/```[\s\S]*?(?:```|$)/g, "");
+  const links = /!?\[([^\]\n]*)\]\(\s*(?:<([^>\n]+\.mp4)>|([^\n)]+\.mp4))\s*\)/gi;
+  for (const match of body.matchAll(links)) {
+    const filePath = match[2] || match[3];
+    if (!path.isAbsolute(filePath)) continue;
+    const existing = videos.get(filePath);
+    if (existing) existing.references.push(match[0]);
+    else videos.set(filePath, { path: filePath, label: match[1] || path.basename(filePath), references: [match[0]] });
+  }
+  return [...videos.values()];
 }
 
 function stripCodexDirectives(text) {
@@ -2742,7 +2756,8 @@ function messageFromEvent(timestamp, payload, meta = {}) {
       timestamp,
       ...meta,
       phase: payload.phase || "",
-      content: stripCodexDirectives(payload.message)
+      content: stripCodexDirectives(payload.message),
+      videos: videosFromText(payload.message)
     };
   }
   return null;
@@ -2788,14 +2803,15 @@ function messageFromResponseItem(timestamp, payload) {
       timestamp,
       phase: payload.phase || "",
       content: stripCodexDirectives(textFromContent(content)),
-      images: imagesFromContent(content)
+      images: imagesFromContent(content),
+      videos: payload.role === "assistant" ? videosFromText(textFromContent(content)) : []
     };
   }
   return null;
 }
 
 function hasDisplayableMessageContent(message) {
-  return Boolean(message?.content || message?.images?.length || message?.localImages?.length);
+  return Boolean(message?.content || message?.images?.length || message?.localImages?.length || message?.videos?.length);
 }
 
 function isTurnEndEvent(payload) {
@@ -4360,6 +4376,94 @@ async function serveLocalImage(res, filePath) {
   }
 }
 
+function parseVideoRange(header, size) {
+  if (header == null) return { start: 0, end: size - 1, partial: false };
+  const match = String(header).trim().match(/^bytes=(\d*)-(\d*)$/i);
+  if (!match || (!match[1] && !match[2])) return null;
+  let start;
+  let end;
+  if (!match[1]) {
+    const suffix = Number(match[2]);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] ? Number(match[2]) : size - 1;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || end < start) return null;
+    end = Math.min(end, size - 1);
+  }
+  return { start, end, partial: true };
+}
+
+async function serveLocalVideo(req, res, { threadId, filePath, download = false }) {
+  if (typeof threadId !== "string" || !threadId.trim()) {
+    sendText(res, 400, "A conversation is required");
+    return;
+  }
+  if (typeof filePath !== "string" || filePath.includes("\0") || !path.isAbsolute(filePath) || path.extname(filePath).toLowerCase() !== ".mp4") {
+    sendText(res, 415, "Only local MP4 files are supported");
+    return;
+  }
+  const data = await getMessages(String(threadId || ""));
+  if (res.destroyed) return;
+  const normalized = path.resolve(filePath);
+  const referenced = data.messages.some((message) => message.role === "assistant" && message.videos?.some((video) => path.resolve(video.path) === normalized));
+  const cwd = data.thread.cwd || data.meta?.cwd;
+  if (!referenced || !cwd || !normalized.startsWith(path.resolve(cwd) + path.sep)) {
+    sendText(res, 403, "Video is not a referenced file in this conversation's project");
+    return;
+  }
+  let handle;
+  let stream;
+  try {
+    const [realRoot, realPath] = await Promise.all([fs.realpath(cwd), fs.realpath(normalized)]);
+    if (!realPath.startsWith(realRoot + path.sep)) {
+      sendText(res, 403, "Forbidden");
+      return;
+    }
+    if (path.extname(realPath).toLowerCase() !== ".mp4") {
+      sendText(res, 415, "Unsupported video type");
+      return;
+    }
+    handle = await fs.open(realPath, "r");
+    const stat = await handle.stat();
+    if (res.destroyed) return;
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size <= 0) {
+      sendText(res, 404, "Not found");
+      return;
+    }
+    const range = parseVideoRange(req.headers.range, stat.size);
+    if (!range) {
+      res.writeHead(416, { "content-range": `bytes */${stat.size}`, "content-length": "0", "accept-ranges": "bytes" });
+      res.end();
+      return;
+    }
+    const headers = {
+      "content-type": "video/mp4", "accept-ranges": "bytes",
+      "content-length": String(range.end - range.start + 1), "cache-control": "no-store"
+    };
+    if (range.partial) headers["content-range"] = `bytes ${range.start}-${range.end}/${stat.size}`;
+    if (download) headers["content-disposition"] = `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(normalized)).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+    if (req.method === "HEAD") {
+      res.writeHead(range.partial ? 206 : 200, headers);
+      res.end();
+      return;
+    }
+    stream = handle.createReadStream({ start: range.start, end: range.end });
+    stream.on("error", () => res.destroy());
+    res.on("close", () => stream.destroy());
+    res.writeHead(range.partial ? 206 : 200, headers);
+    stream.pipe(res);
+  } catch (error) {
+    if (res.headersSent) res.destroy();
+    else if (["ENOENT", "ENOTDIR", "EISDIR"].includes(error.code)) sendText(res, 404, "Not found");
+    else throw error;
+  } finally {
+    if (!stream && handle) await handle.close();
+  }
+}
+
 const handleRequest = async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const requestStartedAt = performance.now();
@@ -4377,6 +4481,11 @@ const handleRequest = async (req, res) => {
     }
   });
   try {
+    if (["GET", "HEAD"].includes(req.method) && url.pathname === "/api/local-video") {
+      if (!requireAuthorized(req, res, url)) return;
+      await serveLocalVideo(req, res, { threadId: url.searchParams.get("threadId"), filePath: url.searchParams.get("path"), download: url.searchParams.get("download") === "1" });
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/api/local-image") {
       if (!requireAuthorized(req, res, url)) return;
       await serveLocalImage(res, url.searchParams.get("path"));

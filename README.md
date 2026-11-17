@@ -40,6 +40,7 @@ Important compatibility note: this first release was developed and verified only
 - Skill picker in the composer, including `/` trigger and friendly skill chips
 - Image attachments when writable
 - Generated-image display alongside the corresponding reply, with uncropped previews and click-to-open original-image dialogs
+- Inline playback and download of referenced project MP4 files, with byte-range streaming
 - Approval and important notice display when detectable from Codex Desktop events
 - Async question cards with options or a typed answer, submitted through the existing Desktop IPC path
 - New conversation creation from the web UI
@@ -294,6 +295,7 @@ The server never returns Codex auth tokens to the browser.
 - For performance, the web UI syncs a recent message window by default instead of the full conversation history. Older tool messages and ordinary folded notices outside the most recent message range may be omitted from the browser view. Important notices, approval cards, and recent visible user/assistant messages are prioritized.
 - The default message window is 80 entries. Older text-only tool output and ordinary notices outside the latest 10 raw messages are omitted; image output remains eligible for display. Large conversations are read from the tail, with bounded backtracking to recover a record split at the read boundary. When too few visible messages are found, the server expands the scan up to 64 MiB. This is not a full-history browser.
 - Images in supported tool-output records are grouped with the same turn's reply when possible; otherwise they remain standalone. Existing generated files are loaded separately through the authenticated image API instead of repeating Base64 in each sync. Local file serving is limited to `~/.codex/generated_images`, with inline-image fallback when available. Arbitrary project-file links are not served as images.
+- Video playback supports absolute local `.mp4` links in assistant replies within the conversation's project directory. The authenticated video endpoint streams file ranges for seeking and downloading; video bytes are not included in message sync. Players do not autoplay and request metadata initially. Browser codec support still depends on the source MP4; transcoding and subtitle loading are not included.
 - While a task is running, text in the composer is sent as steering; an empty composer keeps the Stop action. Steering requires an active turn ID and Desktop support, and currently accepts text only. It stays on Desktop IPC rather than silently creating an independent app-server session.
 - Automatic approval-review records and internal Guardian review chats are hidden; actionable approval cards remain in the original conversation.
 - Developer/system instruction messages and source-tagged injected environment or AGENTS.md context are hidden. User-authored rule text, actual errors, quota notices, and approval requests remain eligible for display.

@@ -160,6 +160,7 @@ const I18N = {
     addImage: "添加图片",
     viewOriginalImage: "查看原图",
     closeImage: "关闭图片",
+    downloadVideo: "下载 MP4",
     pickPhoto: "相册",
     pickFile: "文件浏览",
     removeImage: "移除图片",
@@ -264,6 +265,7 @@ const I18N = {
     addImage: "Add image",
     viewOriginalImage: "View original image",
     closeImage: "Close image",
+    downloadVideo: "Download MP4",
     pickPhoto: "Photos",
     pickFile: "Files",
     removeImage: "Remove image",
@@ -672,8 +674,15 @@ function renderInlinePluginRefs(html) {
   });
 }
 
-function renderMarkdownLite(text) {
-  const escaped = escapeHtml(text || "");
+function renderMarkdownLite(text, videos = []) {
+  const content = String(text || "").split(/(```[\s\S]*?(?:```|$))/g).map((part, index) => {
+    if (index % 2) return part;
+    for (const video of videos) {
+      for (const reference of video.references || []) part = part.replaceAll(reference, "");
+    }
+    return part;
+  }).join("");
+  const escaped = escapeHtml(content.trim());
   const withPluginRefs = renderInlinePluginRefs(escaped);
   const withLocalImages = renderGeneratedImageMarkdown(withPluginRefs);
   const withCodeBlocks = withLocalImages.replace(/```([\s\S]*?)```/g, (_match, code) => `<pre><code>${code.trim()}</code></pre>`);
@@ -734,6 +743,19 @@ function renderPromotedToolImages(message) {
       </div>
     </article>
   `;
+}
+
+function renderMessageVideos(message) {
+  if (!Array.isArray(message.videos) || !message.videos.length) return "";
+  return `<div class="message-videos">${message.videos.map((video) => {
+    const token = state.authToken ? `&token=${encodeURIComponent(state.authToken)}` : "";
+    const src = `/api/local-video?threadId=${encodeURIComponent(state.selectedId)}&path=${encodeURIComponent(video.path)}${token}`;
+    const key = `${state.selectedId}:${message.timestamp || message.lineNumber}:${video.path}`;
+    return `<div class="message-video">
+      <video class="message-video-player" controls playsinline preload="metadata" src="${escapeHtml(src)}" aria-label="${escapeHtml(video.label)}" data-video-key="${escapeHtml(key)}"></video>
+      <div class="message-video-caption"><span>${escapeHtml(video.label)}</span><a href="${escapeHtml(src)}&amp;download=1" download>${escapeHtml(t("downloadVideo"))}</a></div>
+    </div>`;
+  }).join("")}</div>`;
 }
 
 function openImagePreview(image) {
@@ -1114,6 +1136,7 @@ function removePendingMessage(id) {
 }
 
 function renderMessages(data) {
+  const playingVideos = new Map([...els.messageList.querySelectorAll("video[data-video-key]")].map((video) => [video.dataset.videoKey, video]));
   const activeInput = document.activeElement?.classList?.contains("question-answer-input") ? document.activeElement : null;
   const focusedQuestion = activeInput?.closest(".question-answer-form")?.dataset.questionId;
   const selection = activeInput ? [activeInput.selectionStart, activeInput.selectionEnd] : null;
@@ -1133,6 +1156,11 @@ function renderMessages(data) {
   els.threadMeta.textContent = `${t("contents", { count: displayMessages.length })}${statusText}`;
 
   if (!displayMessages.length && !data.status?.thinking) {
+    for (const video of playingVideos.values()) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
     els.messageList.innerHTML = `<div class="empty-state">${escapeHtml(state.selectedId === DRAFT_THREAD_ID ? t("newConversationReady") : t("emptyThread"))}</div>`;
     updateScrollToBottomButton();
     return;
@@ -1165,8 +1193,9 @@ function renderMessages(data) {
           <div class="bubble">
             ${metaTop ? `<div class="message-meta message-meta-top">${escapeHtml(metaTop)}</div>` : ""}
             ${title}
-            ${isQuestion ? renderUserQuestions(message) : message.content && !noticeCollapsed ? renderMarkdownLite(message.content) : ""}
+            ${isQuestion ? renderUserQuestions(message) : message.content && !noticeCollapsed ? renderMarkdownLite(message.content, message.videos) : ""}
             ${!noticeCollapsed ? renderMessageImages(message) : ""}
+            ${!noticeCollapsed ? renderMessageVideos(message) : ""}
             ${renderApprovalActions(message)}
             ${metaBottom ? `<div class="message-meta message-meta-bottom">${escapeHtml(metaBottom)}</div>` : ""}
           </div>
@@ -1187,6 +1216,18 @@ function renderMessages(data) {
     `
     : "";
   els.messageList.innerHTML = `${messageHtml}${thinkingHtml}`;
+  for (const placeholder of els.messageList.querySelectorAll("video[data-video-key]")) {
+    const existing = playingVideos.get(placeholder.dataset.videoKey);
+    if (existing && existing.getAttribute("src") === placeholder.getAttribute("src")) {
+      placeholder.replaceWith(existing);
+      playingVideos.delete(placeholder.dataset.videoKey);
+    }
+  }
+  for (const removed of playingVideos.values()) {
+    removed.pause();
+    removed.removeAttribute("src");
+    removed.load();
+  }
   if (focusedQuestion) {
     const input = [...els.messageList.querySelectorAll(".question-answer-form")].find((form) => form.dataset.questionId === focusedQuestion)?.querySelector(".question-answer-input");
     if (input) {

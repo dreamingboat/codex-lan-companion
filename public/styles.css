@@ -723,6 +723,32 @@ h2 {
   padding: 6px 8px;
 }
 
+.message-videos {
+  margin-top: 12px;
+}
+
+.message-video + .message-video {
+  margin-top: 16px;
+}
+
+.message-video-player {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #111;
+}
+
+.message-video-caption {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .message.user .bubble {
   grid-column: 1;
   grid-row: 1;
